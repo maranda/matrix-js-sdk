@@ -271,7 +271,8 @@ export class FetchHttpApi<O extends IHttpOpts> {
                 referrer: "",
                 referrerPolicy: "no-referrer",
                 cache: "no-cache",
-                credentials: "omit", // we send credentials via headers
+                // credentials: "omit", // we send credentials via headers
+                // Aria Network: leave default fetch behaviour to handle Traefik sticky session cookies to properly handle Archon Backend Routing
                 keepalive: keepAlive,
             });
         } catch (e) {
