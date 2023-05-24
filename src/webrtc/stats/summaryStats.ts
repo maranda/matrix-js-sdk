@@ -16,6 +16,8 @@ export interface SummaryStats {
     receivedVideoMedia: number;
     audioTrackSummary: TrackSummary;
     videoTrackSummary: TrackSummary;
+
+    isFirstCollection: Boolean;
 }
 
 export interface TrackSummary {
@@ -23,4 +25,6 @@ export interface TrackSummary {
     muted: number;
     maxJitter: number;
     maxPacketLoss: number;
+    concealedAudio: number;
+    totalAudio: number;
 }

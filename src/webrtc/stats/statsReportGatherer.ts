@@ -35,8 +35,6 @@ export class StatsReportGatherer {
 
     private readonly trackStats: MediaTrackStatsHandler;
 
-    // private readonly ssrcToMid = { local: new Map<Mid, Ssrc[]>(), remote: new Map<Mid, Ssrc[]>() };
-
     public constructor(
         public readonly callId: string,
         public readonly remoteUserId: string,
@@ -50,11 +48,12 @@ export class StatsReportGatherer {
 
     public async processStats(groupCallId: string, localUserId: string): Promise<SummaryStats> {
         const summary = {
+            isFirstCollection: this.previousStatsReport === undefined,
             receivedMedia: 0,
             receivedAudioMedia: 0,
             receivedVideoMedia: 0,
-            audioTrackSummary: { count: 0, muted: 0, maxPacketLoss: 0, maxJitter: 0 },
-            videoTrackSummary: { count: 0, muted: 0, maxPacketLoss: 0, maxJitter: 0 },
+            audioTrackSummary: { count: 0, muted: 0, maxPacketLoss: 0, maxJitter: 0, concealedAudio: 0, totalAudio: 0 },
+            videoTrackSummary: { count: 0, muted: 0, maxPacketLoss: 0, maxJitter: 0, concealedAudio: 0, totalAudio: 0 },
         } as SummaryStats;
         if (this.isActive) {
             const statsPromise = this.pc.getStats();
@@ -138,6 +137,7 @@ export class StatsReportGatherer {
                     const ts = this.trackStats.findTransceiverByTrackId(trackStats.trackId);
                     TrackStatsReporter.setTrackStatsState(trackStats, ts);
                     TrackStatsReporter.buildJitter(trackStats, now);
+                    TrackStatsReporter.buildAudioConcealment(trackStats, now);
                 } else if (before) {
                     byteSentStats.set(trackStats.trackId, StatsValueFormatter.getNonNegativeValue(now.bytesSent));
                     TrackStatsReporter.buildBitrateSend(trackStats, now, before);
