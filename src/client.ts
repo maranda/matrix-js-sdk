@@ -103,13 +103,7 @@ import { MatrixScheduler } from "./scheduler";
 import { BeaconEvent, BeaconEventHandlerMap } from "./models/beacon";
 import { IAuthData, IAuthDict } from "./interactive-auth";
 import { IMinimalEvent, IRoomEvent, IStateEvent } from "./sync-accumulator";
-import {
-    CrossSigningKey,
-    ICreateSecretStorageOpts,
-    IEncryptedEventInfo,
-    IImportRoomKeysOpts,
-    IRecoveryKey,
-} from "./crypto/api";
+import { CrossSigningKey, ICreateSecretStorageOpts, IEncryptedEventInfo, IRecoveryKey } from "./crypto/api";
 import { EventTimelineSet } from "./models/event-timeline-set";
 import { VerificationRequest } from "./crypto/verification/request/VerificationRequest";
 import { VerificationBase as Verification } from "./crypto/verification/Base";
@@ -207,7 +201,7 @@ import { LocalNotificationSettings } from "./@types/local_notifications";
 import { buildFeatureSupportMap, Feature, ServerSupport } from "./feature";
 import { CryptoBackend } from "./common-crypto/CryptoBackend";
 import { RUST_SDK_STORE_PREFIX } from "./rust-crypto/constants";
-import { BootstrapCrossSigningOpts, CryptoApi } from "./crypto-api";
+import { BootstrapCrossSigningOpts, CryptoApi, ImportRoomKeysOpts } from "./crypto-api";
 import { DeviceInfoMap } from "./crypto/DeviceList";
 import {
     AddSecretStorageKeyOpts,
@@ -592,8 +586,8 @@ export interface IClientWellKnown {
     [M_AUTHENTICATION.name]?: IDelegatedAuthConfig; // MSC2965
 }
 
-export interface IWellKnownConfig {
-    raw?: IClientWellKnown;
+export interface IWellKnownConfig<T = IClientWellKnown> {
+    raw?: T;
     action?: AutoDiscoveryAction;
     reason?: string;
     error?: Error | string;
@@ -2229,7 +2223,13 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // importing rust-crypto will download the webassembly, so we delay it until we know it will be
         // needed.
         const RustCrypto = await import("./rust-crypto");
-        const rustCrypto = await RustCrypto.initRustCrypto(this.http, userId, deviceId, this.secretStorage);
+        const rustCrypto = await RustCrypto.initRustCrypto(
+            this.http,
+            userId,
+            deviceId,
+            this.secretStorage,
+            this.cryptoCallbacks,
+        );
         this.cryptoBackend = rustCrypto;
 
         // attach the event listeners needed by RustCrypto
@@ -2437,12 +2437,17 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @param roomId - the room to use for verification
      *
      * @returns the VerificationRequest that is in progress, if any
+     * @deprecated Prefer {@link CryptoApi.findVerificationRequestDMInProgress}.
      */
     public findVerificationRequestDMInProgress(roomId: string): VerificationRequest | undefined {
         if (!this.cryptoBackend) {
             throw new Error("End-to-end encryption disabled");
+        } else if (!this.crypto) {
+            // Hack for element-R to avoid breaking the cypress tests. We can get rid of this once the react-sdk is
+            // updated to use CryptoApi.findVerificationRequestDMInProgress.
+            return undefined;
         }
-        return this.cryptoBackend.findVerificationRequestDMInProgress(roomId);
+        return this.crypto.findVerificationRequestDMInProgress(roomId);
     }
 
     /**
@@ -2451,6 +2456,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @param userId - the ID of the user to query
      *
      * @returns the VerificationRequests that are in progress
+     * @deprecated Prefer {@link CryptoApi.getVerificationRequestsToDeviceInProgress}.
      */
     public getVerificationRequestsToDeviceInProgress(userId: string): VerificationRequest[] {
         if (!this.crypto) {
@@ -2468,6 +2474,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      *
      * @returns resolves to a VerificationRequest
      *    when the request has been sent to the other party.
+     *
+     * @deprecated Prefer {@link CryptoApi#requestOwnUserVerification} or {@link CryptoApi#requestDeviceVerification}.
      */
     public requestVerification(userId: string, devices?: string[]): Promise<VerificationRequest> {
         if (!this.crypto) {
@@ -2872,6 +2880,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * - migrates Secure Secret Storage to use the latest algorithm, if an outdated
      *   algorithm is found
      *
+     * @deprecated Use {@link CryptoApi#bootstrapSecretStorage}.
      */
     public bootstrapSecretStorage(opts: ICreateSecretStorageOpts): Promise<void> {
         if (!this.crypto) {
@@ -3195,14 +3204,20 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * Import a list of room keys previously exported by exportRoomKeys
      *
      * @param keys - a list of session export objects
+     * @param opts - options object
      *
      * @returns a promise which resolves when the keys have been imported
+     *
+     * @deprecated Prefer {@link CryptoApi.importRoomKeys | `CryptoApi.importRoomKeys`}:
+     * ```javascript
+     *  await client.getCrypto()?.importRoomKeys([..]);
+     * ```
      */
-    public importRoomKeys(keys: IMegolmSessionData[], opts?: IImportRoomKeysOpts): Promise<void> {
-        if (!this.crypto) {
+    public importRoomKeys(keys: IMegolmSessionData[], opts?: ImportRoomKeysOpts): Promise<void> {
+        if (!this.cryptoBackend) {
             throw new Error("End-to-end encryption disabled");
         }
-        return this.crypto.importRoomKeys(keys, opts);
+        return this.cryptoBackend.importRoomKeys(keys, opts);
     }
 
     /**
@@ -3810,7 +3825,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             algorithm.free();
         }
 
-        await this.importRoomKeys(keys, {
+        await this.getCrypto()?.importRoomKeys(keys, {
             progressCallback,
             untrusted,
             source: "backup",

@@ -18,13 +18,9 @@ import type { IMegolmSessionData } from "./@types/crypto";
 import { Room } from "./models/room";
 import { DeviceMap } from "./models/device";
 import { UIAuthCallback } from "./interactive-auth";
-
-/** Types of cross-signing key */
-export enum CrossSigningKey {
-    Master = "master",
-    SelfSigning = "self_signing",
-    UserSigning = "user_signing",
-}
+import { AddSecretStorageKeyOpts, SecretStorageCallbacks, SecretStorageKeyDescription } from "./secret-storage";
+import { VerificationRequest } from "./crypto-api/verification";
+import { KeyBackupInfo } from "./crypto-api/keybackup";
 
 /**
  * Public interface to the cryptography parts of the js-sdk
@@ -81,6 +77,15 @@ export interface CryptoApi {
      *    session export objects
      */
     exportRoomKeys(): Promise<IMegolmSessionData[]>;
+
+    /**
+     * Import a list of room keys previously exported by exportRoomKeys
+     *
+     * @param keys - a list of session export objects
+     * @param opts - options object
+     * @returns a promise which resolves once the keys have been imported
+     */
+    importRoomKeys(keys: IMegolmSessionData[], opts?: ImportRoomKeysOpts): Promise<void>;
 
     /**
      * Get the device information for the given list of users.
@@ -187,11 +192,82 @@ export interface CryptoApi {
     isSecretStorageReady(): Promise<boolean>;
 
     /**
+     * Bootstrap the secret storage by creating a new secret storage key and store it in the secret storage.
+     *
+     * - Do nothing if an AES key is already stored in the secret storage and `setupNewKeyBackup` is not set;
+     * - Generate a new key {@link GeneratedSecretStorageKey} with `createSecretStorageKey`.
+     * - Store this key in the secret storage and set it as the default key.
+     * - Call `cryptoCallbacks.cacheSecretStorageKey` if provided.
+     *
+     * @param opts - Options object.
+     */
+    bootstrapSecretStorage(opts: CreateSecretStorageOpts): Promise<void>;
+
+    /**
      * Get the status of our cross-signing keys.
      *
      * @returns The current status of cross-signing keys: whether we have public and private keys cached locally, and whether the private keys are in secret storage.
      */
     getCrossSigningStatus(): Promise<CrossSigningStatus>;
+
+    /**
+     * Create a recovery key (ie, a key suitable for use with server-side secret storage).
+     *
+     * The key can either be based on a user-supplied passphrase, or just created randomly.
+     *
+     * @param password - Optional passphrase string to use to derive the key,
+     *      which can later be entered by the user as an alternative to entering the
+     *      recovery key itself. If omitted, a key is generated randomly.
+     *
+     * @returns Object including recovery key and server upload parameters.
+     *      The private key should be disposed of after displaying to the use.
+     */
+    createRecoveryKeyFromPassphrase(password?: string): Promise<GeneratedSecretStorageKey>;
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //
+    // Device/User verification
+    //
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * Returns to-device verification requests that are already in progress for the given user id.
+     *
+     * @param userId - the ID of the user to query
+     *
+     * @returns the VerificationRequests that are in progress
+     */
+    getVerificationRequestsToDeviceInProgress(userId: string): VerificationRequest[];
+
+    /**
+     * Finds a DM verification request that is already in progress for the given room id
+     *
+     * @param roomId - the room to use for verification
+     *
+     * @returns the VerificationRequest that is in progress, if any
+     */
+    findVerificationRequestDMInProgress(roomId: string): VerificationRequest | undefined;
+
+    /**
+     * Send a verification request to our other devices.
+     *
+     * If a verification is already in flight, returns it. Otherwise, initiates a new one.
+     *
+     * @returns a VerificationRequest when the request has been sent to the other party.
+     */
+    requestOwnUserVerification(): Promise<VerificationRequest>;
+
+    /**
+     * Request an interactive verification with the given device.
+     *
+     * If a verification is already in flight, returns it. Otherwise, initiates a new one.
+     *
+     * @param userId - ID of the owner of the device to verify
+     * @param deviceId - ID of the device to verify
+     *
+     * @returns a VerificationRequest when the request has been sent to the other party.
+     */
+    requestDeviceVerification(userId: string, deviceId: string): Promise<VerificationRequest>;
 }
 
 /**
@@ -269,7 +345,28 @@ export class DeviceVerificationStatus {
     }
 }
 
-export * from "./crypto-api/verification";
+/**
+ * Room key import progress report.
+ * Used when calling {@link CryptoApi#importRoomKeys} as the parameter of
+ * the progressCallback. Used to display feedback.
+ */
+export interface ImportRoomKeyProgressData {
+    stage: string; // TODO: Enum
+    successes: number;
+    failures: number;
+    total: number;
+}
+
+/**
+ * Options object for {@link CryptoApi#importRoomKeys}.
+ */
+export interface ImportRoomKeysOpts {
+    /** Reports ongoing progress of the import process. Can be used for feedback. */
+    progressCallback?: (stage: ImportRoomKeyProgressData) => void;
+    // TODO, the rust SDK will always such imported keys as untrusted
+    untrusted?: boolean;
+    source?: String; // TODO: Enum (backup, file, ??)
+}
 
 /**
  * The result of a call to {@link CryptoApi.getCrossSigningStatus}.
@@ -292,3 +389,90 @@ export interface CrossSigningStatus {
         userSigningKey: boolean;
     };
 }
+
+/**
+ * Crypto callbacks provided by the application
+ */
+export interface CryptoCallbacks extends SecretStorageCallbacks {
+    getCrossSigningKey?: (keyType: string, pubKey: string) => Promise<Uint8Array | null>;
+    saveCrossSigningKeys?: (keys: Record<string, Uint8Array>) => void;
+    shouldUpgradeDeviceVerifications?: (users: Record<string, any>) => Promise<string[]>;
+    /**
+     * Called by {@link CryptoApi#bootstrapSecretStorage}
+     * @param keyId - secret storage key id
+     * @param keyInfo - secret storage key info
+     * @param key - private key to store
+     */
+    cacheSecretStorageKey?: (keyId: string, keyInfo: SecretStorageKeyDescription, key: Uint8Array) => void;
+    onSecretRequested?: (
+        userId: string,
+        deviceId: string,
+        requestId: string,
+        secretName: string,
+        deviceTrust: DeviceVerificationStatus,
+    ) => Promise<string | undefined>;
+    getDehydrationKey?: (
+        keyInfo: SecretStorageKeyDescription,
+        checkFunc: (key: Uint8Array) => void,
+    ) => Promise<Uint8Array>;
+    getBackupKey?: () => Promise<Uint8Array>;
+}
+
+/**
+ * Parameter of {@link CryptoApi#bootstrapSecretStorage}
+ */
+export interface CreateSecretStorageOpts {
+    /**
+     * Function called to await a secret storage key creation flow.
+     * @returns Promise resolving to an object with public key metadata, encoded private
+     *     recovery key which should be disposed of after displaying to the user,
+     *     and raw private key to avoid round tripping if needed.
+     */
+    createSecretStorageKey?: () => Promise<GeneratedSecretStorageKey>;
+
+    /**
+     * The current key backup object. If passed,
+     * the passphrase and recovery key from this backup will be used.
+     */
+    keyBackupInfo?: KeyBackupInfo;
+
+    /**
+     * If true, a new key backup version will be
+     * created and the private key stored in the new SSSS store. Ignored if keyBackupInfo
+     * is supplied.
+     */
+    setupNewKeyBackup?: boolean;
+
+    /**
+     * Reset even if keys already exist.
+     */
+    setupNewSecretStorage?: boolean;
+
+    /**
+     * Function called to get the user's
+     * current key backup passphrase. Should return a promise that resolves with a Uint8Array
+     * containing the key, or rejects if the key cannot be obtained.
+     */
+    getKeyBackupPassphrase?: () => Promise<Uint8Array>;
+}
+
+/** Types of cross-signing key */
+export enum CrossSigningKey {
+    Master = "master",
+    SelfSigning = "self_signing",
+    UserSigning = "user_signing",
+}
+
+/**
+ * Recovery key created by {@link CryptoApi#createRecoveryKeyFromPassphrase}
+ */
+export interface GeneratedSecretStorageKey {
+    keyInfo?: AddSecretStorageKeyOpts;
+    /** The raw generated private key. */
+    privateKey: Uint8Array;
+    /** The generated key, encoded for display to the user per https://spec.matrix.org/v1.7/client-server-api/#key-representation. */
+    encodedPrivateKey?: string;
+}
+
+export * from "./crypto-api/verification";
+export * from "./crypto-api/keybackup";
