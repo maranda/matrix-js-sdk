@@ -28,8 +28,7 @@ import { Optional } from "matrix-events-sdk";
 import type { SyncCryptoCallbacks } from "./common-crypto/CryptoBackend";
 import { User, UserEvent } from "./models/user";
 import { NotificationCountType, Room, RoomEvent } from "./models/room";
-import { promiseMapSeries, defer, deepCopy } from "./utils";
-import { IDeferred, noUnsafeEventProps, unsafeProp } from "./utils";
+import { deepCopy, defer, IDeferred, noUnsafeEventProps, promiseMapSeries, unsafeProp } from "./utils";
 import { Filter } from "./filter";
 import { EventTimeline } from "./models/event-timeline";
 import { logger } from "./logger";
@@ -650,18 +649,11 @@ export class SyncApi {
             this.opts.lazyLoadMembers = false;
         }
         if (this.opts.lazyLoadMembers) {
-            debuglog("Checking server lazy load support...");
-            const supported = await this.client.doesServerSupportLazyLoading();
-            if (supported) {
-                debuglog("Enabling lazy load on sync filter...");
-                if (!this.opts.filter) {
-                    this.opts.filter = this.buildDefaultFilter();
-                }
-                this.opts.filter.setLazyLoadMembers(true);
-            } else {
-                debuglog("LL: lazy loading requested but not supported " + "by server, so disabling");
-                this.opts.lazyLoadMembers = false;
+            debuglog("Enabling lazy load on sync filter...");
+            if (!this.opts.filter) {
+                this.opts.filter = this.buildDefaultFilter();
             }
+            this.opts.filter.setLazyLoadMembers(true);
         }
         // need to vape the store when enabling LL and wasn't enabled before
         debuglog("Checking whether lazy loading has changed in store...");
@@ -1316,7 +1308,7 @@ export class SyncApi {
             const ephemeralEvents = this.mapSyncEventsFormat(joinObj.ephemeral);
             const accountDataEvents = this.mapSyncEventsFormat(joinObj.account_data);
 
-            const encrypted = client.isRoomEncrypted(room.roomId);
+            const encrypted = this.isRoomEncrypted(room, stateEvents, events);
             // We store the server-provided value first so it's correct when any of the events fire.
             if (joinObj.unread_notifications) {
                 /**
@@ -1324,6 +1316,9 @@ export class SyncApi {
                  * bother setting it here. We trust our calculations better than the
                  * server's for this case, and therefore will assume that our non-zero
                  * count is accurate.
+                 * XXX: this is known faulty as the push rule for `.m.room.encrypted` may be disabled so server
+                 * may issue notification counts of 0 which we wrongly trust.
+                 * https://github.com/matrix-org/matrix-spec-proposals/pull/2654 would fix this
                  *
                  * @see import("./client").fixNotificationCountOnDecryption
                  */
@@ -1719,6 +1714,20 @@ export class SyncApi {
                 },
             );
         });
+    }
+
+    private findEncryptionEvent(events?: MatrixEvent[]): MatrixEvent | undefined {
+        return events?.find((e) => e.getType() === EventType.RoomEncryption && e.getStateKey() === "");
+    }
+
+    // When processing the sync response we cannot rely on MatrixClient::isRoomEncrypted before we actually
+    // inject the events into the room object, so we have to inspect the events themselves.
+    private isRoomEncrypted(room: Room, stateEventList: MatrixEvent[], timelineEventList?: MatrixEvent[]): boolean {
+        return (
+            this.client.isRoomEncrypted(room.roomId) ||
+            !!this.findEncryptionEvent(stateEventList) ||
+            !!this.findEncryptionEvent(timelineEventList)
+        );
     }
 
     /**

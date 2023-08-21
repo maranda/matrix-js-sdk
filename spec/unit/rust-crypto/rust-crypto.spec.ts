@@ -23,6 +23,8 @@ import { RustCrypto } from "../../../src/rust-crypto/rust-crypto";
 import { initRustCrypto } from "../../../src/rust-crypto";
 import {
     CryptoEvent,
+    Device,
+    DeviceVerification,
     HttpApiEvent,
     HttpApiEventHandlerMap,
     IHttpOpts,
@@ -59,32 +61,7 @@ describe("RustCrypto", () => {
         );
 
         it("should import and export keys", async () => {
-            const someRoomKeys = [
-                {
-                    algorithm: "m.megolm.v1.aes-sha2",
-                    room_id: "!cLDYAnjpiQXIrSwngM:localhost:8480",
-                    sender_key: "C9FMqTD20C0VaGWE/aSImkimuE6HDa/RyYj5gRUg3gY",
-                    session_id: "iGQG5GaP1/B3dSH6zCQDQqrNuotrtQjVC7w1OsUDwbg",
-                    session_key:
-                        "AQAAAADaCbP2gdOy8jrhikjploKgSBaFSJ5rvHcziaADbwNEzeCSrfuAUlXvCvxik8kU+MfCHIi5arN2M7UM5rGKdzkHnkReoIByFkeMdbjKWk5SFpVQexcM74eDhBGj+ICkQqOgApfnEbSswrmreB0+MhHHyLStwW5fy5f8A9QW1sbPuohkBuRmj9fwd3Uh+swkA0KqzbqLa7UI1Qu8NTrFA8G4",
-                    sender_claimed_keys: {
-                        ed25519: "RSq0Xw0RR0DeqlJ/j3qrF5qbN0D96fKk8lz9kZJlG9k",
-                    },
-                    forwarding_curve25519_key_chain: [],
-                },
-                {
-                    algorithm: "m.megolm.v1.aes-sha2",
-                    room_id: "!cLDYAnjpiQXIrSwngM:localhost:8480",
-                    sender_key: "C9FMqTD20C0VaGWE/aSImkimuE6HDa/RyYj5gRUg3gY",
-                    session_id: "P/Jy9Tog4CMtLseeS4Fe2AEXZov3k6cibcop/uyhr78",
-                    session_key:
-                        "AQAAAAATyAVm0c9c9DW9Od72MxvfSDYoysBw3C6yMJ3bYuTmssHN7yNGm59KCtKeFp2Y5qO7lvUmwOfSTvTASUb7HViE7Lt+Bvp5WiMTJ2Pv6m+N12ihyowV5lgtKFWI18Wxd0AugMTVQRwjBK6aMobf86NXWD2hiKm3N6kWbC0PXmqV7T/ycvU6IOAjLS7HnkuBXtgBF2aL95OnIm3KKf7soa+/",
-                    sender_claimed_keys: {
-                        ed25519: "RSq0Xw0RR0DeqlJ/j3qrF5qbN0D96fKk8lz9kZJlG9k",
-                    },
-                    forwarding_curve25519_key_chain: [],
-                },
-            ];
+            const someRoomKeys = testData.MEGOLM_SESSION_DATA_ARRAY;
             let importTotal = 0;
             const opt: ImportRoomKeysOpts = {
                 progressCallback: (stage) => {
@@ -93,11 +70,11 @@ describe("RustCrypto", () => {
             };
             await rustCrypto.importRoomKeys(someRoomKeys, opt);
 
-            expect(importTotal).toBe(2);
+            expect(importTotal).toBe(someRoomKeys.length);
 
             const keys = await rustCrypto.exportRoomKeys();
             expect(Array.isArray(keys)).toBeTruthy();
-            expect(keys.length).toBe(2);
+            expect(keys.length).toBe(someRoomKeys.length);
 
             const aSession = someRoomKeys[0];
 
@@ -168,7 +145,7 @@ describe("RustCrypto", () => {
         });
     });
 
-    it("getCrossSigningKeyId", async () => {
+    it("getCrossSigningKeyId when there is no cross signing keys", async () => {
         const rustCrypto = await makeTestRustCrypto();
         await expect(rustCrypto.getCrossSigningKeyId()).resolves.toBe(null);
     });
@@ -351,6 +328,60 @@ describe("RustCrypto", () => {
         });
     });
 
+    describe("setDeviceVerified", () => {
+        let rustCrypto: RustCrypto;
+
+        async function getTestDevice(): Promise<Device> {
+            const devices = await rustCrypto.getUserDeviceInfo([testData.TEST_USER_ID]);
+            return devices.get(testData.TEST_USER_ID)!.get(testData.TEST_DEVICE_ID)!;
+        }
+
+        beforeEach(async () => {
+            rustCrypto = await makeTestRustCrypto(
+                new MatrixHttpApi(new TypedEventEmitter<HttpApiEvent, HttpApiEventHandlerMap>(), {
+                    baseUrl: "http://server/",
+                    prefix: "",
+                    onlyData: true,
+                }),
+                testData.TEST_USER_ID,
+            );
+
+            fetchMock.post("path:/_matrix/client/v3/keys/upload", { one_time_key_counts: {} });
+            fetchMock.post("path:/_matrix/client/v3/keys/query", {
+                device_keys: {
+                    [testData.TEST_USER_ID]: {
+                        [testData.TEST_DEVICE_ID]: testData.SIGNED_TEST_DEVICE_DATA,
+                    },
+                },
+            });
+            // call onSyncCompleted to kick off the outgoingRequestLoop and download the device list.
+            rustCrypto.onSyncCompleted({});
+
+            // before the call, the device should be unverified.
+            const device = await getTestDevice();
+            expect(device.verified).toEqual(DeviceVerification.Unverified);
+        });
+
+        it("should throw an error for an unknown device", async () => {
+            await expect(rustCrypto.setDeviceVerified(testData.TEST_USER_ID, "xxy")).rejects.toThrow("Unknown device");
+        });
+
+        it("should mark an unverified device as verified", async () => {
+            await rustCrypto.setDeviceVerified(testData.TEST_USER_ID, testData.TEST_DEVICE_ID);
+
+            // and confirm that the device is now verified
+            expect((await getTestDevice()).verified).toEqual(DeviceVerification.Verified);
+        });
+
+        it("should mark a verified device as unverified", async () => {
+            await rustCrypto.setDeviceVerified(testData.TEST_USER_ID, testData.TEST_DEVICE_ID);
+            expect((await getTestDevice()).verified).toEqual(DeviceVerification.Verified);
+
+            await rustCrypto.setDeviceVerified(testData.TEST_USER_ID, testData.TEST_DEVICE_ID, false);
+            expect((await getTestDevice()).verified).toEqual(DeviceVerification.Unverified);
+        });
+    });
+
     describe("getDeviceVerificationStatus", () => {
         let rustCrypto: RustCrypto;
         let olmMachine: Mocked<RustSdkCryptoJs.OlmMachine>;
@@ -501,6 +532,41 @@ describe("RustCrypto", () => {
             await expect(() => rustCrypto.requestDeviceVerification(TEST_USER, "unknown")).rejects.toThrow(
                 "Not a known device",
             );
+        });
+    });
+
+    describe("get|storeSessionBackupPrivateKey", () => {
+        it("can save and restore a key", async () => {
+            const key = "testtesttesttesttesttesttesttest";
+            const rustCrypto = await makeTestRustCrypto();
+            await rustCrypto.storeSessionBackupPrivateKey(new TextEncoder().encode(key));
+            const fetched = await rustCrypto.getSessionBackupPrivateKey();
+            expect(new TextDecoder().decode(fetched!)).toEqual(key);
+        });
+    });
+
+    describe("getActiveSessionBackupVersion", () => {
+        it("returns null", async () => {
+            const rustCrypto = await makeTestRustCrypto();
+            expect(await rustCrypto.getActiveSessionBackupVersion()).toBeNull();
+        });
+    });
+
+    describe("findVerificationRequestDMInProgress", () => {
+        it("throws an error if the userId is not provided", async () => {
+            const rustCrypto = await makeTestRustCrypto();
+            expect(() => rustCrypto.findVerificationRequestDMInProgress(testData.TEST_ROOM_ID)).toThrow(
+                "missing userId",
+            );
+        });
+    });
+
+    describe("requestVerificationDM", () => {
+        it("send verification request to an unknown user", async () => {
+            const rustCrypto = await makeTestRustCrypto();
+            await expect(() =>
+                rustCrypto.requestVerificationDM("@bob:example.com", testData.TEST_ROOM_ID),
+            ).rejects.toThrow("unknown userId @bob:example.com");
         });
     });
 });

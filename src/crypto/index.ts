@@ -50,7 +50,7 @@ import { IllegalMethod } from "./verification/IllegalMethod";
 import { KeySignatureUploadError } from "../errors";
 import { calculateKeyCheck, decryptAES, encryptAES, IEncryptedPayload } from "./aes";
 import { DehydrationManager } from "./dehydration";
-import { BackupManager } from "./backup";
+import { BackupManager, backupTrustInfoFromLegacyTrustInfo } from "./backup";
 import { IStore } from "../store";
 import { Room, RoomEvent } from "../models/room";
 import { RoomMember, RoomMemberEvent } from "../models/room-member";
@@ -87,10 +87,13 @@ import {
 } from "../secret-storage";
 import { ISecretRequest } from "./SecretSharing";
 import {
+    BackupTrustInfo,
     BootstrapCrossSigningOpts,
     CrossSigningStatus,
     DeviceVerificationStatus,
     ImportRoomKeysOpts,
+    KeyBackupCheck,
+    KeyBackupInfo,
     VerificationRequest as CryptoApiVerificationRequest,
 } from "../crypto-api";
 import { Device, DeviceMap } from "../models/device";
@@ -1281,6 +1284,42 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
     }
 
     /**
+     * Get the current status of key backup.
+     *
+     * Implementation of {@link CryptoApi.getActiveSessionBackupVersion}.
+     */
+    public async getActiveSessionBackupVersion(): Promise<string | null> {
+        if (this.backupManager.getKeyBackupEnabled()) {
+            return this.backupManager.version ?? null;
+        }
+        return null;
+    }
+
+    /**
+     * Determine if a key backup can be trusted.
+     *
+     * Implementation of {@link Crypto.CryptoApi.isKeyBackupTrusted}.
+     */
+    public async isKeyBackupTrusted(info: KeyBackupInfo): Promise<BackupTrustInfo> {
+        const trustInfo = await this.backupManager.isKeyBackupTrusted(info);
+        return backupTrustInfoFromLegacyTrustInfo(trustInfo);
+    }
+
+    /**
+     * Force a re-check of the key backup and enable/disable it as appropriate.
+     *
+     * Implementation of {@link CryptoApi.checkKeyBackupAndEnable}.
+     */
+    public async checkKeyBackupAndEnable(): Promise<KeyBackupCheck | null> {
+        const checkResult = await this.backupManager.checkKeyBackup();
+        if (!checkResult || !checkResult.backupInfo) return null;
+        return {
+            backupInfo: checkResult.backupInfo,
+            trustInfo: backupTrustInfoFromLegacyTrustInfo(checkResult.trustInfo),
+        };
+    }
+
+    /**
      * Checks that a given cross-signing private key matches a given public key.
      * This can be used by the getCrossSigningKey callback to verify that the
      * private key it is about to supply is the one that was requested.
@@ -2175,6 +2214,15 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
     }
 
     /**
+     * Mark the given device as locally verified.
+     *
+     * Implementation of {@link CryptoApi#setDeviceVerified}.
+     */
+    public async setDeviceVerified(userId: string, deviceId: string, verified = true): Promise<void> {
+        await this.setDeviceVerification(userId, deviceId, verified);
+    }
+
+    /**
      * Update the blocked/verified state of the given device
      *
      * @param userId - owner of the device
@@ -2347,8 +2395,8 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
         return deviceObj;
     }
 
-    public findVerificationRequestDMInProgress(roomId: string): VerificationRequest | undefined {
-        return this.inRoomVerificationRequests.findRequestInProgress(roomId);
+    public findVerificationRequestDMInProgress(roomId: string, userId?: string): VerificationRequest | undefined {
+        return this.inRoomVerificationRequests.findRequestInProgress(roomId, userId);
     }
 
     public getVerificationRequestsToDeviceInProgress(userId: string): VerificationRequest[] {

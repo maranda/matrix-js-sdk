@@ -133,7 +133,7 @@ import {
     IFilterResponse,
     ITagsResponse,
     IStatusResponse,
-    IAddThreePidBody,
+    KnockRoomOpts,
 } from "./@types/requests";
 import {
     EventType,
@@ -210,7 +210,7 @@ import { LocalNotificationSettings } from "./@types/local_notifications";
 import { buildFeatureSupportMap, Feature, ServerSupport } from "./feature";
 import { CryptoBackend } from "./common-crypto/CryptoBackend";
 import { RUST_SDK_STORE_PREFIX } from "./rust-crypto/constants";
-import { BootstrapCrossSigningOpts, CryptoApi, ImportRoomKeysOpts } from "./crypto-api";
+import { BootstrapCrossSigningOpts, CrossSigningKeyInfo, CryptoApi, ImportRoomKeysOpts } from "./crypto-api";
 import { DeviceInfoMap } from "./crypto/DeviceList";
 import {
     AddSecretStorageKeyOpts,
@@ -524,13 +524,8 @@ export interface Capabilities {
     [UNSTABLE_MSC3882_CAPABILITY.altName]?: IMSC3882GetLoginTokenCapability;
 }
 
-/* eslint-disable camelcase */
-export interface ICrossSigningKey {
-    keys: { [algorithm: string]: string };
-    signatures?: ISignatures;
-    usage: string[];
-    user_id: string;
-}
+/** @deprecated prefer {@link CrossSigningKeyInfo}. */
+export type ICrossSigningKey = CrossSigningKeyInfo;
 
 enum CrossSigningKeyType {
     MasterKey = "master_key",
@@ -1291,7 +1286,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             baseUrl: opts.baseUrl,
             idBaseUrl: opts.idBaseUrl,
             accessToken: opts.accessToken,
-            prefix: ClientPrefix.R0,
+            prefix: ClientPrefix.V3,
             onlyData: true,
             extraParams: opts.queryParams,
             localTimeoutMs: opts.localTimeoutMs,
@@ -2248,9 +2243,18 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         // attach the event listeners needed by RustCrypto
         this.on(RoomMemberEvent.Membership, rustCrypto.onRoomMembership.bind(rustCrypto));
+        this.on(ClientEvent.Event, (event) => {
+            rustCrypto.onLiveEventFromSync(event);
+        });
 
         // re-emit the events emitted by the crypto impl
-        this.reEmitter.reEmit(rustCrypto, [CryptoEvent.VerificationRequestReceived]);
+        this.reEmitter.reEmit(rustCrypto, [
+            CryptoEvent.VerificationRequestReceived,
+            CryptoEvent.UserTrustStatusChanged,
+            CryptoEvent.KeyBackupStatus,
+            CryptoEvent.KeyBackupSessionsRemaining,
+            CryptoEvent.KeyBackupFailed,
+        ]);
     }
 
     /**
@@ -2440,6 +2444,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      *
      * @returns resolves to a VerificationRequest
      *    when the request has been sent to the other party.
+     *
+     * @deprecated Prefer {@link CryptoApi.requestVerificationDM}.
      */
     public requestVerificationDM(userId: string, roomId: string): Promise<VerificationRequest> {
         if (!this.crypto) {
@@ -2679,12 +2685,14 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * Check the copy of our cross-signing key that we have in the device list and
      * see if we can get the private key. If so, mark it as trusted.
      * @param opts - ICheckOwnCrossSigningTrustOpts object
+     *
+     * @deprecated Unneeded for the new crypto
      */
     public checkOwnCrossSigningTrust(opts?: ICheckOwnCrossSigningTrustOpts): Promise<void> {
-        if (!this.crypto) {
+        if (!this.cryptoBackend) {
             throw new Error("End-to-end encryption disabled");
         }
-        return this.crypto.checkOwnCrossSigningTrust(opts);
+        return this.cryptoBackend.checkOwnCrossSigningTrust(opts);
     }
 
     /**
@@ -3247,6 +3255,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      *     getKeyBackupVersion) in backupInfo and
      *     trust information (as returned by isKeyBackupTrusted)
      *     in trustInfo.
+     *
+     * @deprecated Prefer {@link CryptoApi.checkKeyBackupAndEnable}.
      */
     public checkKeyBackup(): Promise<IKeyBackupCheck | null> {
         if (!this.crypto) {
@@ -3282,6 +3292,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
     /**
      * @param info - key backup info dict from getKeyBackupVersion()
+     *
+     * @deprecated Prefer {@link CryptoApi.isKeyBackupTrusted | `CryptoApi.isKeyBackupTrusted`}.
      */
     public isKeyBackupTrusted(info: IKeyBackupInfo): Promise<TrustInfo> {
         if (!this.crypto) {
@@ -3294,6 +3306,12 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @returns true if the client is configured to back up keys to
      *     the server, otherwise false. If we haven't completed a successful check
      *     of key backup status yet, returns null.
+     *
+     * @deprecated Prefer direct access to {@link CryptoApi.getActiveSessionBackupVersion}:
+     *
+     * ```javascript
+     * let enabled = (await client.getCrypto().getActiveSessionBackupVersion()) !== null;
+     * ```
      */
     public getKeyBackupEnabled(): boolean | null {
         if (!this.crypto) {
@@ -3308,6 +3326,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      *
      * @param info - Backup information object as returned by getKeyBackupVersion
      * @returns Promise which resolves when complete.
+     *
+     * @deprecated Do not call this directly. Instead call {@link CryptoApi.checkKeyBackupAndEnable}.
      */
     public enableKeyBackup(info: IKeyBackupInfo): Promise<void> {
         if (!this.crypto) {
@@ -3413,9 +3433,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             await this.crypto.crossSigningInfo.signObject(data.auth_data, "master");
         }
 
-        const res = await this.http.authedRequest<IKeyBackupInfo>(Method.Post, "/room_keys/version", undefined, data, {
-            prefix: ClientPrefix.V3,
-        });
+        const res = await this.http.authedRequest<IKeyBackupInfo>(Method.Post, "/room_keys/version", undefined, data);
 
         // We could assume everything's okay and enable directly, but this ensures
         // we run the same signature verification that will be used for future
@@ -3436,6 +3454,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // If we're currently backing up to this backup... stop.
         // (We start using it automatically in createKeyBackupVersion
         // so this is symmetrical).
+        // TODO: convert this to use crypto.getActiveSessionBackupVersion. And actually check the version.
         if (this.crypto.backupManager.version) {
             this.crypto.backupManager.disableKeyBackup();
         }
@@ -3721,10 +3740,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         backupInfo: IKeyBackupInfo,
         opts?: IKeyBackupRestoreOpts,
     ): Promise<IKeyBackupRestoreResult> {
-        if (!this.crypto) {
+        if (!this.cryptoBackend) {
             throw new Error("End-to-end encryption disabled");
         }
-        const privKey = await this.crypto.getSessionBackupPrivateKey();
+        const privKey = await this.cryptoBackend.getSessionBackupPrivateKey();
         if (!privKey) {
             throw new Error("Couldn't get key");
         }
@@ -3762,7 +3781,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         const cacheCompleteCallback = opts?.cacheCompleteCallback;
         const progressCallback = opts?.progressCallback;
 
-        if (!this.crypto) {
+        if (!this.cryptoBackend) {
             throw new Error("End-to-end encryption disabled");
         }
 
@@ -3785,9 +3804,13 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 return Promise.reject(new MatrixError({ errcode: MatrixClient.RESTORE_BACKUP_ERROR_BAD_KEY }));
             }
 
+            if (!(privKey instanceof Uint8Array)) {
+                // eslint-disable-next-line @typescript-eslint/no-base-to-string
+                throw new Error(`restoreKeyBackup expects Uint8Array, got ${privKey}`);
+            }
             // Cache the key, if possible.
             // This is async.
-            this.crypto
+            this.cryptoBackend
                 .storeSessionBackupPrivateKey(privKey)
                 .catch((e) => {
                     logger.warn("Error caching session backup key:", e);
@@ -3844,7 +3867,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             algorithm.free();
         }
 
-        await this.getCrypto()?.importRoomKeys(keys, {
+        await this.cryptoBackend.importRoomKeys(keys, {
             progressCallback,
             untrusted,
             source: "backup",
@@ -3907,7 +3930,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public getMediaConfig(): Promise<IMediaConfig> {
         return this.http.authedRequest(Method.Get, "/config", undefined, undefined, {
-            prefix: MediaPrefix.R0,
+            prefix: MediaPrefix.V3,
         });
     }
 
@@ -4140,6 +4163,34 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             // return syncApi.syncRoom(room);
         }
         return syncRoom;
+    }
+
+    /**
+     * Knock a room. If you have already knocked the room, this will no-op.
+     * @param roomIdOrAlias - The room ID or room alias to knock.
+     * @param opts - Options when knocking the room.
+     * @returns Promise which resolves: `{room_id: {string}}`
+     * @returns Rejects: with an error response.
+     */
+    public knockRoom(roomIdOrAlias: string, opts: KnockRoomOpts = {}): Promise<{ room_id: string }> {
+        const room = this.getRoom(roomIdOrAlias);
+        if (room?.hasMembershipState(this.credentials.userId!, "knock")) {
+            return Promise.resolve({ room_id: room.roomId });
+        }
+
+        const path = utils.encodeUri("/knock/$roomIdOrAlias", { $roomIdOrAlias: roomIdOrAlias });
+
+        const queryParams: Record<string, string | string[]> = {};
+        if (opts.viaServers) {
+            queryParams.server_name = opts.viaServers;
+        }
+
+        const body: Record<string, string> = {};
+        if (opts.reason) {
+            body.reason = opts.reason;
+        }
+
+        return this.http.authedRequest(Method.Post, path, queryParams, body);
     }
 
     /**
@@ -5134,7 +5185,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             },
             undefined,
             {
-                prefix: MediaPrefix.R0,
+                prefix: MediaPrefix.V3,
                 priority: "low",
             },
         );
@@ -5301,7 +5352,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             address: address,
         };
 
-        if (this.identityServer?.getAccessToken && (await this.doesServerAcceptIdentityAccessToken())) {
+        if (this.identityServer?.getAccessToken) {
             const identityAccessToken = await this.identityServer.getAccessToken();
             if (identityAccessToken) {
                 params["id_access_token"] = identityAccessToken;
@@ -6093,7 +6144,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         const opts = {
             prefix:
                 Thread.hasServerSideListSupport === FeatureSupport.Stable
-                    ? "/_matrix/client/v1"
+                    ? ClientPrefix.V1
                     : "/_matrix/client/unstable/org.matrix.msc3856",
         };
 
@@ -6618,20 +6669,6 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         params: QueryDict,
     ): Promise<T> {
         const postParams = Object.assign({}, params);
-
-        // If the HS supports separate add and bind, then requestToken endpoints
-        // don't need an IS as they are all validated by the HS directly.
-        if (!(await this.doesServerSupportSeparateAddAndBind()) && this.idBaseUrl) {
-            const idServerUrl = new URL(this.idBaseUrl);
-            postParams.id_server = idServerUrl.host;
-
-            if (this.identityServer?.getAccessToken && (await this.doesServerAcceptIdentityAccessToken())) {
-                const identityAccessToken = await this.identityServer.getAccessToken();
-                if (identityAccessToken) {
-                    postParams.id_access_token = identityAccessToken;
-                }
-            }
-        }
 
         return this.http.request(Method.Post, endpoint, undefined, postParams);
     }
@@ -7338,78 +7375,6 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     /**
-     * Query the server to see if it supports members lazy loading
-     * @returns true if server supports lazy loading
-     */
-    public async doesServerSupportLazyLoading(): Promise<boolean> {
-        const response = await this.getVersions();
-        if (!response) return false;
-
-        const versions = response["versions"];
-        const unstableFeatures = response["unstable_features"];
-
-        return (
-            (versions && versions.includes("r0.5.0")) || (unstableFeatures && unstableFeatures["m.lazy_load_members"])
-        );
-    }
-
-    /**
-     * Query the server to see if the `id_server` parameter is required
-     * when registering with an 3pid, adding a 3pid or resetting password.
-     * @returns true if id_server parameter is required
-     */
-    public async doesServerRequireIdServerParam(): Promise<boolean> {
-        const response = await this.getVersions();
-        if (!response) return true;
-
-        const versions = response["versions"];
-
-        // Supporting r0.6.0 is the same as having the flag set to false
-        if (versions && versions.includes("r0.6.0")) {
-            return false;
-        }
-
-        const unstableFeatures = response["unstable_features"];
-        if (!unstableFeatures) return true;
-        if (unstableFeatures["m.require_identity_server"] === undefined) {
-            return true;
-        } else {
-            return unstableFeatures["m.require_identity_server"];
-        }
-    }
-
-    /**
-     * Query the server to see if the `id_access_token` parameter can be safely
-     * passed to the homeserver. Some homeservers may trigger errors if they are not
-     * prepared for the new parameter.
-     * @returns true if id_access_token can be sent
-     */
-    public async doesServerAcceptIdentityAccessToken(): Promise<boolean> {
-        const response = await this.getVersions();
-        if (!response) return false;
-
-        const versions = response["versions"];
-        const unstableFeatures = response["unstable_features"];
-        return (versions && versions.includes("r0.6.0")) || (unstableFeatures && unstableFeatures["m.id_access_token"]);
-    }
-
-    /**
-     * Query the server to see if it supports separate 3PID add and bind functions.
-     * This affects the sequence of API calls clients should use for these operations,
-     * so it's helpful to be able to check for support.
-     * @returns true if separate functions are supported
-     */
-    public async doesServerSupportSeparateAddAndBind(): Promise<boolean> {
-        const response = await this.getVersions();
-        if (!response) return false;
-
-        const versions = response["versions"];
-        const unstableFeatures = response["unstable_features"];
-
-        return versions?.includes("r0.6.0") || unstableFeatures?.["m.separate_add_and_bind"];
-    }
-
-    /**
      * Query the server to see if it lists support for an unstable feature
      * in the /versions response
      * @param feature - the feature name
@@ -7478,14 +7443,6 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 fwdPagination: FeatureSupport.None,
             };
         }
-    }
-
-    /**
-     * Query the server to see if it supports the MSC2457 `logout_devices` parameter when setting password
-     * @returns true if server supports the `logout_devices` parameter
-     */
-    public doesServerSupportLogoutDevices(): Promise<boolean> {
-        return this.isVersionSupported("r0.6.1");
     }
 
     /**
@@ -7873,18 +7830,6 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     /**
-     * @param relayState - URL Callback after SAML2 Authentication
-     * @returns Promise which resolves to a LoginResponse object
-     * @returns Rejects: with an error response.
-     * @deprecated this isn't in the Matrix spec anymore
-     */
-    public loginWithSAML2(relayState: string): Promise<LoginResponse> {
-        return this.login("m.login.saml2", {
-            relay_state: relayState,
-        });
-    }
-
-    /**
      * @param redirectUrl - The URL to redirect to after the HS
      * authenticates with CAS.
      * @returns The HS URL to hit to begin the CAS login process.
@@ -7913,7 +7858,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             [SSO_ACTION_PARAM.unstable!]: action,
         };
 
-        return this.http.getUrl(url, params, ClientPrefix.R0).href;
+        return this.http.getUrl(url, params).href;
     }
 
     /**
@@ -8031,13 +7976,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             $loginType: loginType,
         });
 
-        return this.http.getUrl(
-            path,
-            {
-                session: authSessionId,
-            },
-            ClientPrefix.R0,
-        ).href;
+        return this.http.getUrl(path, {
+            session: authSessionId,
+        }).href;
     }
 
     /**
@@ -8052,11 +7993,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         // inject the id_access_token if inviting 3rd party addresses
         const invitesNeedingToken = (options.invite_3pid || []).filter((i) => !i.id_access_token);
-        if (
-            invitesNeedingToken.length > 0 &&
-            this.identityServer?.getAccessToken &&
-            (await this.doesServerAcceptIdentityAccessToken())
-        ) {
+        if (invitesNeedingToken.length > 0 && this.identityServer?.getAccessToken) {
             const identityAccessToken = await this.identityServer.getAccessToken();
             if (identityAccessToken) {
                 for (const invite of invitesNeedingToken) {
@@ -8416,30 +8353,6 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     /**
-     * Set the visbility of a room bridged to a 3rd party network in
-     * the current HS's room directory.
-     * @param networkId - the network ID of the 3rd party
-     *                 instance under which this room is published under.
-     * @param visibility - "public" to make the room visible
-     *                 in the public directory, or "private" to make
-     *                 it invisible.
-     * @returns Promise which resolves: result object
-     * @returns Rejects: with an error response.
-     * @deprecated missing from the spec
-     */
-    public setRoomDirectoryVisibilityAppService(
-        networkId: string,
-        roomId: string,
-        visibility: "public" | "private",
-    ): Promise<any> {
-        const path = utils.encodeUri("/directory/list/appservice/$networkId/$roomId", {
-            $networkId: networkId,
-            $roomId: roomId,
-        });
-        return this.http.authedRequest(Method.Put, path, undefined, { visibility: visibility });
-    }
-
-    /**
      * Query the user directory with a term matching user IDs, display names and domains.
      * @param term - the term with which to search.
      * @param limit - the maximum number of results to return. The server will
@@ -8522,29 +8435,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     /**
-     * Add a 3PID to your homeserver account and optionally bind it to an identity
-     * server as well. An identity server is required as part of the `creds` object.
-     *
-     * @deprecated this API is deprecated, and you should instead use `addThreePidOnly` for homeservers that support it.
-     *
-     * @returns Promise which resolves: on success
-     * @returns Rejects: with an error response.
-     */
-    public addThreePid(creds: IAddThreePidBody, bind: boolean): Promise<{ submit_url?: string }> {
-        const path = "/account/3pid";
-        const data = {
-            threePidCreds: creds,
-            bind: bind,
-        };
-        return this.http.authedRequest(Method.Post, path, undefined, data);
-    }
-
-    /**
      * Add a 3PID to your homeserver account. This API does not use an identity
      * server, as the homeserver is expected to handle 3PID ownership validation.
-     *
-     * You can check whether a homeserver supports this API via
-     * `doesServerSupportSeparateAddAndBind`.
      *
      * @param data - A object with 3PID validation data from having called
      * `account/3pid/<medium>/requestToken` on the homeserver.
@@ -8553,17 +8445,13 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public async addThreePidOnly(data: IAddThreePidOnlyBody): Promise<{}> {
         const path = "/account/3pid/add";
-        const prefix = (await this.isVersionSupported("r0.6.0")) ? ClientPrefix.R0 : ClientPrefix.Unstable;
-        return this.http.authedRequest(Method.Post, path, undefined, data, { prefix });
+        return this.http.authedRequest(Method.Post, path, undefined, data);
     }
 
     /**
      * Bind a 3PID for discovery onto an identity server via the homeserver. The
      * identity server handles 3PID ownership validation and the homeserver records
      * the new binding to track where all 3PIDs for the account are bound.
-     *
-     * You can check whether a homeserver supports this API via
-     * `doesServerSupportSeparateAddAndBind`.
      *
      * @param data - A object with 3PID validation data from having called
      * `validate/<medium>/requestToken` on the identity server. It should also
@@ -8573,8 +8461,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public async bindThreePid(data: IBindThreePidBody): Promise<{}> {
         const path = "/account/3pid/bind";
-        const prefix = (await this.isVersionSupported("r0.6.0")) ? ClientPrefix.R0 : ClientPrefix.Unstable;
-        return this.http.authedRequest(Method.Post, path, undefined, data, { prefix });
+        return this.http.authedRequest(Method.Post, path, undefined, data);
     }
 
     /**
@@ -8599,8 +8486,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             address,
             id_server: this.getIdentityServerUrl(true),
         };
-        const prefix = (await this.isVersionSupported("r0.6.0")) ? ClientPrefix.R0 : ClientPrefix.Unstable;
-        return this.http.authedRequest(Method.Post, path, undefined, data, { prefix });
+        return this.http.authedRequest(Method.Post, path, undefined, data);
     }
 
     /**
@@ -8908,9 +8794,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     public uploadKeySignatures(content: KeySignatures): Promise<IUploadKeySignaturesResponse> {
-        return this.http.authedRequest(Method.Post, "/keys/signatures/upload", undefined, content, {
-            prefix: ClientPrefix.V3,
-        });
+        return this.http.authedRequest(Method.Post, "/keys/signatures/upload", undefined, content);
     }
 
     /**
@@ -9755,6 +9639,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @param toStartOfTimeline - the direction
      */
     public processThreadRoots(room: Room, threadedEvents: MatrixEvent[], toStartOfTimeline: boolean): void {
+        if (!this.supportsThreads()) return;
         room.processThreadRoots(threadedEvents, toStartOfTimeline);
     }
 
@@ -9845,18 +9730,7 @@ export function fixNotificationCountOnDecryption(cli: MatrixClient, event: Matri
     const room = cli.getRoom(event.getRoomId());
     if (!room || !ourUserId || !eventId) return;
 
-    const oldActions = event.getPushActions();
-    const actions = cli.getPushActionsForEvent(event, true);
-
     const isThreadEvent = !!event.threadRootId && !event.isThreadRoot;
-
-    const currentHighlightCount = room.getUnreadCountForEventContext(NotificationCountType.Highlight, event);
-
-    // Ensure the unread counts are kept up to date if the event is encrypted
-    // We also want to make sure that the notification count goes up if we already
-    // have encrypted events to avoid other code from resetting 'highlight' to zero.
-    const oldHighlight = !!oldActions?.tweaks?.highlight;
-    const newHighlight = !!actions?.tweaks?.highlight;
 
     let hasReadEvent;
     if (isThreadEvent) {
@@ -9879,13 +9753,17 @@ export function fixNotificationCountOnDecryption(cli: MatrixClient, event: Matri
         return;
     }
 
-    if (oldHighlight !== newHighlight || currentHighlightCount > 0) {
+    const actions = cli.getPushActionsForEvent(event, true);
+
+    // Ensure the unread counts are kept up to date if the event is encrypted
+    // We also want to make sure that the notification count goes up if we already
+    // have encrypted events to avoid other code from resetting 'highlight' to zero.
+    const newHighlight = !!actions?.tweaks?.highlight;
+
+    if (newHighlight) {
         // TODO: Handle mentions received while the client is offline
         // See also https://github.com/vector-im/element-web/issues/9069
-        let newCount = currentHighlightCount;
-        if (newHighlight && !oldHighlight) newCount++;
-        if (!newHighlight && oldHighlight) newCount--;
-
+        const newCount = room.getUnreadCountForEventContext(NotificationCountType.Highlight, event) + 1;
         if (isThreadEvent) {
             room.setThreadUnreadNotificationCount(event.threadRootId, NotificationCountType.Highlight, newCount);
         } else {
@@ -9893,23 +9771,18 @@ export function fixNotificationCountOnDecryption(cli: MatrixClient, event: Matri
         }
     }
 
-    // Total count is used to typically increment a room notification counter, but not loudly highlight it.
-    const currentTotalCount = room.getUnreadCountForEventContext(NotificationCountType.Total, event);
-
     // `notify` is used in practice for incrementing the total count
     const newNotify = !!actions?.notify;
 
     // The room total count is NEVER incremented by the server for encrypted rooms. We basically ignore
     // the server here as it's always going to tell us to increment for encrypted events.
     if (newNotify) {
+        // Total count is used to typically increment a room notification counter, but not loudly highlight it.
+        const newCount = room.getUnreadCountForEventContext(NotificationCountType.Total, event) + 1;
         if (isThreadEvent) {
-            room.setThreadUnreadNotificationCount(
-                event.threadRootId,
-                NotificationCountType.Total,
-                currentTotalCount + 1,
-            );
+            room.setThreadUnreadNotificationCount(event.threadRootId, NotificationCountType.Total, newCount);
         } else {
-            room.setUnreadNotificationCount(NotificationCountType.Total, currentTotalCount + 1);
+            room.setUnreadNotificationCount(NotificationCountType.Total, newCount);
         }
     }
 }
