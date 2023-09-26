@@ -228,7 +228,7 @@ describe("Room", function () {
     });
 
     describe("getCreator", () => {
-        it("should return the creator from m.room.create", function () {
+        it("should return the sender from m.room.create", function () {
             // @ts-ignore - mocked doesn't handle overloads sanely
             mocked(room.currentState.getStateEvents).mockImplementation(function (type, key) {
                 if (type === EventType.RoomCreate && key === "") {
@@ -239,13 +239,31 @@ describe("Room", function () {
                         room: roomId,
                         user: userA,
                         content: {
-                            creator: userA,
+                            creator: userB, // The creator field was dropped in room version 11 but a malicious client might still send it
                         },
                     });
                 }
             });
             const roomCreator = room.getCreator();
             expect(roomCreator).toStrictEqual(userA);
+        });
+
+        it("should return null if the sender is undefined", function () {
+            // @ts-ignore - mocked doesn't handle overloads sanely
+            mocked(room.currentState.getStateEvents).mockImplementation(function (type, key) {
+                if (type === EventType.RoomCreate && key === "") {
+                    return utils.mkEvent({
+                        event: true,
+                        type: EventType.RoomCreate,
+                        skey: "",
+                        room: roomId,
+                        user: undefined,
+                        content: {},
+                    });
+                }
+            });
+            const roomCreator = room.getCreator();
+            expect(roomCreator).toBeNull();
         });
     });
 
@@ -1184,6 +1202,21 @@ describe("Room", function () {
                 room.recalculate();
                 expect(room.name).toEqual("Empty room");
             });
+
+            it("emits an update event", function () {
+                const spy = jest.fn();
+                const summary = {
+                    "m.heroes": [],
+                    "m.invited_member_count": 1,
+                };
+
+                room.once(RoomEvent.Summary, spy);
+
+                room.setSummary(summary);
+                room.recalculate();
+
+                expect(spy).toHaveBeenCalledWith(summary);
+            });
         });
 
         describe("Room.recalculate => Room Name", function () {
@@ -1420,6 +1453,87 @@ describe("Room", function () {
         }
 
         describe("addReceipt", function () {
+            describe("resets the unread count", () => {
+                const event1 = utils.mkMessage({ room: roomId, user: userA, msg: "1", event: true });
+                const event2 = utils.mkMessage({ room: roomId, user: userA, msg: "2", event: true });
+
+                it("should reset the unread count when our non-synthetic receipt points to the latest event", () => {
+                    // Given a room with 2 events, and an unread count set.
+                    room.client.isInitialSyncComplete = jest.fn().mockReturnValue(true);
+                    room.timeline = [event1, event2];
+                    room.setUnread(NotificationCountType.Total, 45);
+                    room.setUnread(NotificationCountType.Highlight, 57);
+                    // Sanity check:
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+
+                    // When I receive a receipt for me for the last event
+                    const receipt = mkReceipt(roomId, [mkRecord(event2.getId()!, "m.read", userA, 123)]);
+                    room.addReceipt(receipt);
+
+                    // Then the count is set to 0
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(0);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(0);
+                });
+
+                it("should not reset the unread count when someone else's receipt points to the latest event", () => {
+                    // Given a room with 2 events, and an unread count set.
+                    room.client.isInitialSyncComplete = jest.fn().mockReturnValue(true);
+                    room.timeline = [event1, event2];
+                    room.setUnread(NotificationCountType.Total, 45);
+                    room.setUnread(NotificationCountType.Highlight, 57);
+                    // Sanity check:
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+
+                    // When I receive a receipt for someone else for the last event
+                    const receipt = mkReceipt(roomId, [mkRecord(event2.getId()!, "m.read", userB, 123)]);
+                    room.addReceipt(receipt);
+
+                    // Then the count is unchanged because it's not my receipt
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+                });
+
+                it("should not reset the unread count when our non-synthetic receipt points to an earlier event", () => {
+                    // Given a room with 2 events, and an unread count set.
+                    room.client.isInitialSyncComplete = jest.fn().mockReturnValue(true);
+                    room.timeline = [event1, event2];
+                    room.setUnread(NotificationCountType.Total, 45);
+                    room.setUnread(NotificationCountType.Highlight, 57);
+                    // Sanity check:
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+
+                    // When I receive a receipt for me for an earlier event
+                    const receipt = mkReceipt(roomId, [mkRecord(event1.getId()!, "m.read", userA, 123)]);
+                    room.addReceipt(receipt);
+
+                    // Then the count is unchanged because it wasn't the latest event
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+                });
+
+                it("should not reset the unread count when our a synthetic receipt points to the latest event", () => {
+                    // Given a room with 2 events, and an unread count set.
+                    room.client.isInitialSyncComplete = jest.fn().mockReturnValue(true);
+                    room.timeline = [event1, event2];
+                    room.setUnread(NotificationCountType.Total, 45);
+                    room.setUnread(NotificationCountType.Highlight, 57);
+                    // Sanity check:
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+
+                    // When I receive a synthetic receipt for me for the last event
+                    const receipt = mkReceipt(roomId, [mkRecord(event2.getId()!, "m.read", userA, 123)]);
+                    room.addReceipt(receipt, true);
+
+                    // Then the count is unchanged because the receipt was synthetic
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Total)).toEqual(45);
+                    expect(room.getUnreadNotificationCount(NotificationCountType.Highlight)).toEqual(57);
+                });
+            });
+
             it("should store the receipt so it can be obtained via getReceiptsForEvent", function () {
                 const ts = 13787898424;
                 room.addReceipt(mkReceipt(roomId, [mkRecord(eventToAck.getId()!, "m.read", userB, ts)]));
@@ -3471,12 +3585,10 @@ describe("Room", function () {
 
         function roomCreateEvent(newRoomId: string, predecessorRoomId: string | null): MatrixEvent {
             const content: {
-                creator: string;
                 ["m.federate"]: boolean;
                 room_version: string;
                 predecessor: { event_id: string; room_id: string } | undefined;
             } = {
-                "creator": "@daryl:alexandria.example.com",
                 "predecessor": undefined,
                 "m.federate": true,
                 "room_version": "9",
