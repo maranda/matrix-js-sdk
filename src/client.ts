@@ -52,7 +52,7 @@ import { IExportedDevice as IExportedOlmDevice } from "./crypto/OlmDevice";
 import { IOlmDevice } from "./crypto/algorithms/megolm";
 import { TypedReEmitter } from "./ReEmitter";
 import { IRoomEncryption, RoomList } from "./crypto/RoomList";
-import { logger } from "./logger";
+import { logger, Logger } from "./logger";
 import { SERVICE_TYPES } from "./service-types";
 import {
     Body,
@@ -64,6 +64,7 @@ import {
     IdentityPrefix,
     IHttpOpts,
     IRequestOpts,
+    TokenRefreshFunction,
     MatrixError,
     MatrixHttpApi,
     MediaPrefix,
@@ -201,7 +202,7 @@ import {
     threadFilterTypeToFilter,
 } from "./models/thread";
 import { M_BEACON_INFO, MBeaconInfoEventContent } from "./@types/beacon";
-import { UnstableValue } from "./NamespacedValue";
+import { NamespacedValue, UnstableValue } from "./NamespacedValue";
 import { ToDeviceMessageQueue } from "./ToDeviceMessageQueue";
 import { ToDeviceBatch } from "./models/ToDeviceMessage";
 import { IgnoredInvites } from "./models/invites-ignorer";
@@ -294,6 +295,14 @@ export interface ICreateClientOpts {
     deviceId?: string;
 
     accessToken?: string;
+    refreshToken?: string;
+
+    /**
+     * Function used to attempt refreshing access and refresh tokens
+     * Called by http-api when a possibly expired token is encountered
+     * and a refreshToken is found
+     */
+    tokenRefreshFunction?: TokenRefreshFunction;
 
     /**
      * Identity server provider to retrieve the user's access token when accessing
@@ -415,6 +424,12 @@ export interface ICreateClientOpts {
      * so that livekit media can be used in the application layert (js-sdk contains no livekit code).
      */
     useLivekitForGroupCalls?: boolean;
+
+    /**
+     * A logger to associate with this MatrixClient.
+     * Defaults to the built-in global logger.
+     */
+    logger?: Logger;
 }
 
 export interface IMatrixClientCreateOpts extends ICreateClientOpts {
@@ -519,9 +534,22 @@ export interface IChangePasswordCapability extends ICapability {}
 
 export interface IThreadsCapability extends ICapability {}
 
-export interface IMSC3882GetLoginTokenCapability extends ICapability {}
+export interface IGetLoginTokenCapability extends ICapability {}
 
-export const UNSTABLE_MSC3882_CAPABILITY = new UnstableValue("m.get_login_token", "org.matrix.msc3882.get_login_token");
+/**
+ * @deprecated use {@link IGetLoginTokenCapability} instead
+ */
+export type IMSC3882GetLoginTokenCapability = IGetLoginTokenCapability;
+
+export const GET_LOGIN_TOKEN_CAPABILITY = new NamespacedValue(
+    "m.get_login_token",
+    "org.matrix.msc3882.get_login_token",
+);
+
+/**
+ * @deprecated use {@link GET_LOGIN_TOKEN_CAPABILITY} instead
+ */
+export const UNSTABLE_MSC3882_CAPABILITY = GET_LOGIN_TOKEN_CAPABILITY;
 
 export const UNSTABLE_MSC2666_SHARED_ROOMS = "uk.half-shot.msc2666";
 export const UNSTABLE_MSC2666_MUTUAL_ROOMS = "uk.half-shot.msc2666.mutual_rooms";
@@ -536,8 +564,8 @@ export interface Capabilities {
     "m.change_password"?: IChangePasswordCapability;
     "m.room_versions"?: IRoomVersionsCapability;
     "io.element.thread"?: IThreadsCapability;
-    [UNSTABLE_MSC3882_CAPABILITY.name]?: IMSC3882GetLoginTokenCapability;
-    [UNSTABLE_MSC3882_CAPABILITY.altName]?: IMSC3882GetLoginTokenCapability;
+    "m.get_login_token"?: IGetLoginTokenCapability;
+    "org.matrix.msc3882.get_login_token"?: IGetLoginTokenCapability;
 }
 
 /** @deprecated prefer {@link CrossSigningKeyInfo}. */
@@ -1194,6 +1222,8 @@ const SSO_ACTION_PARAM = new UnstableValue("action", "org.matrix.msc3824.action"
 export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHandlerMap> {
     public static readonly RESTORE_BACKUP_ERROR_BAD_KEY = "RESTORE_BACKUP_ERROR_BAD_KEY";
 
+    private readonly logger: Logger;
+
     public reEmitter = new TypedReEmitter<EmittedEvents, ClientEventHandlerMap>(this);
     public olmVersion: [number, number, number] | null = null; // populated after initCrypto
     public usingExternalCrypto = false;
@@ -1299,6 +1329,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     public constructor(opts: IMatrixClientCreateOpts) {
         super();
 
+        // If a custom logger is provided, use it. Otherwise, default to the global
+        // one in logger.ts.
+        this.logger = opts.logger ?? logger;
+
         opts.baseUrl = utils.ensureNoTrailingSlash(opts.baseUrl);
         opts.idBaseUrl = utils.ensureNoTrailingSlash(opts.idBaseUrl);
 
@@ -1319,26 +1353,29 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             baseUrl: opts.baseUrl,
             idBaseUrl: opts.idBaseUrl,
             accessToken: opts.accessToken,
+            refreshToken: opts.refreshToken,
+            tokenRefreshFunction: opts.tokenRefreshFunction,
             prefix: ClientPrefix.V3,
             onlyData: true,
             extraParams: opts.queryParams,
             localTimeoutMs: opts.localTimeoutMs,
             useAuthorizationHeader: opts.useAuthorizationHeader,
+            logger: this.logger,
         });
 
         if (opts.deviceToImport) {
             if (this.deviceId) {
-                logger.warn(
+                this.logger.warn(
                     "not importing device because device ID is provided to " +
                         "constructor independently of exported data",
                 );
             } else if (this.credentials.userId) {
-                logger.warn(
+                this.logger.warn(
                     "not importing device because user ID is provided to " +
                         "constructor independently of exported data",
                 );
             } else if (!opts.deviceToImport.deviceId) {
-                logger.warn("not importing device because no device ID in exported data");
+                this.logger.warn("not importing device because no device ID in exported data");
             } else {
                 this.deviceId = opts.deviceToImport.deviceId;
                 this.credentials.userId = opts.deviceToImport.userId;
@@ -1510,7 +1547,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         if (this.syncApi) {
             // This shouldn't happen since we thought the client was not running
-            logger.error("Still have sync object whilst not running: stopping old one");
+            this.logger.error("Still have sync object whilst not running: stopping old one");
             this.syncApi.stop();
         }
 
@@ -1524,7 +1561,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             Thread.setServerSideListSupport(list);
             Thread.setServerSideFwdPaginationSupport(fwdPagination);
         } catch (e) {
-            logger.error("Can't fetch server versions, continuing to initialise sync, this will be retried later", e);
+            this.logger.error(
+                "Can't fetch server versions, continuing to initialise sync, this will be retried later",
+                e,
+            );
         }
 
         this.clientOpts = opts ?? {};
@@ -1540,7 +1580,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         }
 
         if (this.clientOpts.hasOwnProperty("experimentalThreadSupport")) {
-            logger.warn("`experimentalThreadSupport` has been deprecated, use `threadSupport` instead");
+            this.logger.warn("`experimentalThreadSupport` has been deprecated, use `threadSupport` instead");
         }
 
         // If `threadSupport` is omitted and the deprecated `experimentalThreadSupport` has been passed
@@ -1552,7 +1592,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             this.clientOpts.threadSupport = this.clientOpts.experimentalThreadSupport;
         }
 
-        this.syncApi.sync().catch((e) => logger.info("Sync startup aborted with an error:", e));
+        this.syncApi.sync().catch((e) => this.logger.info("Sync startup aborted with an error:", e));
 
         if (this.clientOpts.clientWellKnownPollPeriod !== undefined) {
             this.clientWellKnownIntervalID = setInterval(() => {
@@ -1591,7 +1631,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         if (!this.clientRunning) return; // already stopped
 
-        logger.log("stopping MatrixClient");
+        this.logger.debug("stopping MatrixClient");
 
         this.clientRunning = false;
 
@@ -1641,7 +1681,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         }
 
         if (!getDeviceResult.device_data || !getDeviceResult.device_id) {
-            logger.info("no dehydrated device found");
+            this.logger.info("no dehydrated device found");
             return;
         }
 
@@ -1649,16 +1689,16 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         try {
             const deviceData = getDeviceResult.device_data;
             if (deviceData.algorithm !== DEHYDRATION_ALGORITHM) {
-                logger.warn("Wrong algorithm for dehydrated device");
+                this.logger.warn("Wrong algorithm for dehydrated device");
                 return;
             }
-            logger.log("unpickling dehydrated device");
+            this.logger.debug("unpickling dehydrated device");
             const key = await this.cryptoCallbacks.getDehydrationKey(deviceData, (k) => {
                 // copy the key so that it doesn't get clobbered
                 account.unpickle(new Uint8Array(k), deviceData.account);
             });
             account.unpickle(key, deviceData.account);
-            logger.log("unpickled device");
+            this.logger.debug("unpickled device");
 
             const rehydrateResult = await this.http.authedRequest<{ success: boolean }>(
                 Method.Post,
@@ -1674,7 +1714,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
             if (rehydrateResult.success) {
                 this.deviceId = getDeviceResult.device_id;
-                logger.info("using dehydrated device");
+                this.logger.info("using dehydrated device");
                 const pickleKey = this.pickleKey || "DEFAULT_KEY";
                 this.exportedOlmDeviceToImport = {
                     pickledAccount: account.pickle(pickleKey),
@@ -1685,12 +1725,12 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 return this.deviceId;
             } else {
                 account.free();
-                logger.info("not using dehydrated device");
+                this.logger.info("not using dehydrated device");
                 return;
             }
         } catch (e) {
             account.free();
-            logger.warn("could not unpickle", e);
+            this.logger.warn("could not unpickle", e);
         }
     }
 
@@ -1710,7 +1750,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 },
             );
         } catch (e) {
-            logger.info("could not get dehydrated device", e);
+            this.logger.info("could not get dehydrated device", e);
             return;
         }
     }
@@ -1732,7 +1772,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         deviceDisplayName?: string,
     ): Promise<void> {
         if (!this.crypto) {
-            logger.warn("not dehydrating device if crypto is not enabled");
+            this.logger.warn("not dehydrating device if crypto is not enabled");
             return;
         }
         return this.crypto.dehydrationManager.setKeyAndQueueDehydration(key, keyInfo, deviceDisplayName);
@@ -1753,7 +1793,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         deviceDisplayName?: string,
     ): Promise<string | undefined> {
         if (!this.crypto) {
-            logger.warn("not dehydrating device if crypto is not enabled");
+            this.logger.warn("not dehydrating device if crypto is not enabled");
             return;
         }
         await this.crypto.dehydrationManager.setKey(key, keyInfo, deviceDisplayName);
@@ -1762,7 +1802,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
     public async exportDevice(): Promise<IExportedDevice | undefined> {
         if (!this.crypto) {
-            logger.warn("not exporting device if crypto is not enabled");
+            this.logger.warn("not exporting device if crypto is not enabled");
             return;
         }
         return {
@@ -1805,10 +1845,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 `${RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto-meta`,
             ]) {
                 const prom = new Promise((resolve, reject) => {
-                    logger.info(`Removing IndexedDB instance ${dbname}`);
+                    this.logger.info(`Removing IndexedDB instance ${dbname}`);
                     const req = indexedDB.deleteDatabase(dbname);
                     req.onsuccess = (_): void => {
-                        logger.info(`Removed IndexedDB instance ${dbname}`);
+                        this.logger.info(`Removed IndexedDB instance ${dbname}`);
                         resolve(0);
                     };
                     req.onerror = (e): void => {
@@ -1817,11 +1857,11 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                         // database that did not allow mutations."
                         //
                         // it seems like the only thing we can really do is ignore the error.
-                        logger.warn(`Failed to remove IndexedDB instance ${dbname}:`, e);
+                        this.logger.warn(`Failed to remove IndexedDB instance ${dbname}:`, e);
                         resolve(0);
                     };
                     req.onblocked = (e): void => {
-                        logger.info(`cannot yet remove IndexedDB instance ${dbname}`);
+                        this.logger.info(`cannot yet remove IndexedDB instance ${dbname}`);
                     };
                 });
                 await prom;
@@ -2128,7 +2168,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         if (this.cachedCapabilities && !fresh) {
             if (now < this.cachedCapabilities.expiration) {
-                logger.log("Returning cached capabilities");
+                this.logger.debug("Returning cached capabilities");
                 return Promise.resolve(this.cachedCapabilities.capabilities);
             }
         }
@@ -2140,7 +2180,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             .authedRequest<Response>(Method.Get, "/capabilities")
             .catch((e: Error): Response => {
                 // We swallow errors because we need a default object anyhow
-                logger.error(e);
+                this.logger.error(e);
                 return {};
             })
             .then((r = {}) => {
@@ -2155,7 +2195,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     expiration: now + cacheMs,
                 };
 
-                logger.log("Caching capabilities: ", capabilities);
+                this.logger.debug("Caching capabilities: ", capabilities);
                 return capabilities;
             });
     }
@@ -2178,7 +2218,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         }
 
         if (this.cryptoBackend) {
-            logger.warn("Attempt to re-initialise e2e encryption on MatrixClient");
+            this.logger.warn("Attempt to re-initialise e2e encryption on MatrixClient");
             return;
         }
 
@@ -2187,11 +2227,11 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             throw new Error(`Cannot enable encryption: no cryptoStore provided`);
         }
 
-        logger.log("Crypto: Starting up crypto store...");
+        this.logger.debug("Crypto: Starting up crypto store...");
         await this.cryptoStore.startup();
 
         // initialise the list of encrypted rooms (whether or not crypto is enabled)
-        logger.log("Crypto: initialising roomlist...");
+        this.logger.debug("Crypto: initialising roomlist...");
         await this.roomList.init();
 
         const userId = this.getUserId();
@@ -2231,7 +2271,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             CryptoEvent.KeysChanged,
         ]);
 
-        logger.log("Crypto: initialising crypto object...");
+        this.logger.debug("Crypto: initialising crypto object...");
         await crypto.init({
             exportedOlmDevice: this.exportedOlmDeviceToImport,
             pickleKey: this.pickleKey,
@@ -2247,7 +2287,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // upload our keys in the background
         this.crypto.uploadDeviceKeys().catch((e) => {
             // TODO: throwing away this error is a really bad idea.
-            logger.error("Error uploading device keys", e);
+            this.logger.error("Error uploading device keys", e);
         });
     }
 
@@ -2268,7 +2308,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public async initRustCrypto({ useIndexedDB = true }: { useIndexedDB?: boolean } = {}): Promise<void> {
         if (this.cryptoBackend) {
-            logger.warn("Attempt to re-initialise e2e encryption on MatrixClient");
+            this.logger.warn("Attempt to re-initialise e2e encryption on MatrixClient");
             return;
         }
 
@@ -2291,6 +2331,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // needed.
         const RustCrypto = await import("./rust-crypto");
         const rustCrypto = await RustCrypto.initRustCrypto(
+            this.logger,
             this.http,
             userId,
             deviceId,
@@ -2369,7 +2410,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @deprecated Does nothing.
      */
     public async uploadKeys(): Promise<void> {
-        logger.warn("MatrixClient.uploadKeys is deprecated");
+        this.logger.warn("MatrixClient.uploadKeys is deprecated");
     }
 
     /**
@@ -3449,7 +3490,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         if (opts.secureSecretStorage) {
             await this.secretStorage.store("m.megolm_backup.v1", encodeBase64(privateKey));
-            logger.info("Key backup private key stored in secret storage");
+            this.logger.info("Key backup private key stored in secret storage");
         }
 
         return {
@@ -3518,7 +3559,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // sessions.
         await this.checkKeyBackup();
         if (!this.getKeyBackupEnabled()) {
-            logger.error("Key backup not usable even though we just created it");
+            this.logger.error("Key backup not usable even though we just created it");
         }
 
         return res;
@@ -3719,7 +3760,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         targetSessionId?: string,
         opts?: IKeyBackupRestoreOpts,
     ): Promise<IKeyBackupRestoreResult> {
-        if (!this.crypto) {
+        if (!this.cryptoBackend) {
             throw new Error("End-to-end encryption disabled");
         }
         const storedKey = await this.secretStorage.get("m.megolm_backup.v1");
@@ -3851,6 +3892,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             throw new Error("End-to-end encryption disabled");
         }
 
+        if (!backupInfo.version) {
+            throw new Error("Backup version must be defined");
+        }
+
         let totalKeyCount = 0;
         let keys: IMegolmSessionData[] = [];
 
@@ -3868,9 +3913,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             // Cache the key, if possible.
             // This is async.
             this.cryptoBackend
-                .storeSessionBackupPrivateKey(privKey)
+                .storeSessionBackupPrivateKey(privKey, backupInfo.version)
                 .catch((e) => {
-                    logger.warn("Error caching session backup key:", e);
+                    this.logger.warn("Error caching session backup key:", e);
                 })
                 .then(cacheCompleteCallback);
 
@@ -3917,7 +3962,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     key.session_id = targetSessionId!;
                     keys.push(key);
                 } catch (e) {
-                    logger.log("Failed to decrypt megolm session from backup", e);
+                    this.logger.debug("Failed to decrypt megolm session from backup", e);
                 }
             }
         } finally {
@@ -3963,7 +4008,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         const roomEncryption = this.roomList.getRoomEncryption(roomId);
         if (!roomEncryption) {
             // unknown room, or unencrypted room
-            logger.error("Unknown room.  Not sharing decryption keys");
+            this.logger.error("Unknown room.  Not sharing decryption keys");
             return;
         }
 
@@ -3978,7 +4023,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         if (alg.sendSharedHistoryInboundSessions) {
             await alg.sendSharedHistoryInboundSessions(devicesByUser);
         } else {
-            logger.warn("Algorithm does not support sharing previous keys", roomEncryption.algorithm);
+            this.logger.warn("Algorithm does not support sharing previous keys", roomEncryption.algorithm);
         }
     }
 
@@ -4561,7 +4606,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         }
 
         const type = localEvent.getType();
-        logger.log(`sendEvent of type ${type} in ${roomId} with txnId ${txnId}`);
+        this.logger.debug(`sendEvent of type ${type} in ${roomId} with txnId ${txnId}`);
 
         localEvent.setTxnId(txnId);
         localEvent.setStatus(EventStatus.SENDING);
@@ -4633,7 +4678,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 return promise;
             })
             .catch((err) => {
-                logger.error("Error sending event", err.stack || err);
+                this.logger.error("Error sending event", err.stack || err);
                 try {
                     // set the error on the event before we update the status:
                     // updating the status emits the event, so the state should be
@@ -4641,7 +4686,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     event.error = err;
                     this.updatePendingEventStatus(room, event, EventStatus.NOT_SENT);
                 } catch (e) {
-                    logger.error("Exception in error handler!", (<Error>e).stack || err);
+                    this.logger.error("Exception in error handler!", (<Error>e).stack || err);
                 }
                 if (err instanceof MatrixError) {
                     err.event = event;
@@ -4754,7 +4799,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         return this.http
             .authedRequest<ISendEventResponse>(Method.Put, path, undefined, event.getWireContent())
             .then((res) => {
-                logger.log(`Event sent to ${event.getRoomId()} with event id ${res.event_id}`);
+                this.logger.debug(`Event sent to ${event.getRoomId()} with event id ${res.event_id}`);
                 return res;
             });
     }
@@ -5854,7 +5899,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         const mapper = this.getEventMapper();
         const event = mapper(res.event);
         if (event.isRelation(THREAD_RELATION_TYPE.name)) {
-            logger.warn("Tried loading a regular timeline at the position of a thread event");
+            this.logger.warn("Tried loading a regular timeline at the position of a thread event");
             return undefined;
         }
         const events = [
@@ -6991,7 +7036,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         // cleanup locks
         this.syncLeftRoomsPromise
             .then(() => {
-                logger.log("Marking success of sync left room request");
+                this.logger.debug("Marking success of sync left room request");
                 this.syncedLeftRooms = true; // flip the bit on success
             })
             .finally(() => {
@@ -7196,14 +7241,14 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         let credentialsGood = false;
         const remainingTime = this.turnServersExpiry - Date.now();
         if (remainingTime > TURN_CHECK_INTERVAL) {
-            logger.debug("TURN creds are valid for another " + remainingTime + " ms: not fetching new ones.");
+            this.logger.debug("TURN creds are valid for another " + remainingTime + " ms: not fetching new ones.");
             credentialsGood = true;
         } else {
-            logger.debug("Fetching new TURN credentials");
+            this.logger.debug("Fetching new TURN credentials");
             try {
                 const res = await this.turnServer();
                 if (res.uris) {
-                    logger.log("Got TURN URIs: " + res.uris + " refresh in " + res.ttl + " secs");
+                    this.logger.debug("Got TURN URIs: " + res.uris + " refresh in " + res.ttl + " secs");
                     // map the response to a format that can be fed to RTCPeerConnection
                     const servers: ITurnServer = {
                         urls: res.uris,
@@ -7217,10 +7262,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                     this.emit(ClientEvent.TurnServers, this.turnServers);
                 }
             } catch (err) {
-                logger.error("Failed to get TURN URIs", err);
+                this.logger.error("Failed to get TURN URIs", err);
                 if ((<HTTPError>err).httpStatus === 403) {
                     // We got a 403, so there's no point in looping forever.
-                    logger.info("TURN access unavailable for this account: stopping credentials checks");
+                    this.logger.info("TURN access unavailable for this account: stopping credentials checks");
                     if (this.checkTurnServersIntervalID !== null) global.clearInterval(this.checkTurnServersIntervalID);
                     this.checkTurnServersIntervalID = undefined;
                     this.emit(ClientEvent.TurnServersError, <HTTPError>err, true); // fatal
@@ -7683,6 +7728,14 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     }
 
     /**
+     * Get the refresh token associated with this account.
+     * @returns The refresh_token or null
+     */
+    public getRefreshToken(): string | null {
+        return this.http.opts.refreshToken ?? null;
+    }
+
+    /**
      * Set the access token associated with this account.
      * @param token - The new access token.
      */
@@ -7959,7 +8012,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             try {
                 while ((await this.crypto.backupManager.backupPendingKeys(200)) > 0);
             } catch (err) {
-                logger.error("Key backup request failed when logging out. Some keys may be missing from backup", err);
+                this.logger.error(
+                    "Key backup request failed when logging out. Some keys may be missing from backup",
+                    err,
+                );
             }
         }
 
@@ -8002,7 +8058,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * Make a request for an `m.login.token` to be issued as per
      * [MSC3882](https://github.com/matrix-org/matrix-spec-proposals/pull/3882).
      * The server may require User-Interactive auth.
-     * Note that this is UNSTABLE and subject to breaking changes without notice.
+     *
+     * Compatibility with unstable implementations of MSC3882 is deprecated and will be removed in a future release.
+     *
      * @param auth - Optional. Auth data to supply for User-Interactive auth.
      * @returns Promise which resolves: On success, the token response
      * or UIA auth data.
@@ -8010,10 +8068,18 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     public async requestLoginToken(auth?: AuthDict): Promise<UIAResponse<LoginTokenPostResponse>> {
         // use capabilities to determine which revision of the MSC is being used
         const capabilities = await this.getCapabilities();
-        // use r1 endpoint if capability is exposed otherwise use old r0 endpoint
-        const endpoint = UNSTABLE_MSC3882_CAPABILITY.findIn(capabilities)
-            ? "/org.matrix.msc3882/login/get_token" // r1 endpoint
-            : "/org.matrix.msc3882/login/token"; // r0 endpoint
+
+        let endpoint: string;
+        if (capabilities[GET_LOGIN_TOKEN_CAPABILITY.name]) {
+            // use the stable endpoint
+            endpoint = `${ClientPrefix.V1}/login/get_token`;
+        } else if (capabilities[GET_LOGIN_TOKEN_CAPABILITY.altName!]) {
+            // newer unstable r1 endpoint
+            endpoint = `${ClientPrefix.Unstable}/org.matrix.msc3882/login/get_token`;
+        } else {
+            // old unstable r0 endpoint
+            endpoint = `${ClientPrefix.Unstable}/org.matrix.msc3882/login/token`;
+        }
 
         const body: UIARequest<{}> = { auth };
         const res = await this.http.authedRequest<UIAResponse<LoginTokenPostResponse>>(
@@ -8021,10 +8087,10 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             endpoint,
             undefined, // no query params
             body,
-            { prefix: ClientPrefix.Unstable },
+            { prefix: "" },
         );
 
-        // the representation of expires_in changed from revision 0 to revision 1 so we populate
+        // the representation of expires_in changed from unstable revision 0 to unstable revision 1 so we cross populate
         if ("login_token" in res) {
             if (typeof res.expires_in_ms === "number") {
                 res.expires_in = Math.floor(res.expires_in_ms / 1000);
@@ -8110,7 +8176,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 templatedUrl += "/$eventType";
             }
         } else if (eventType !== null) {
-            logger.warn(`eventType: ${eventType} ignored when fetching
+            this.logger.warn(`eventType: ${eventType} ignored when fetching
             relations as relationType is null`);
             eventType = null;
         }
@@ -9402,7 +9468,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             targets.set(userId, Array.from(deviceMessages.keys()));
         }
 
-        logger.log(`PUT ${path}`, targets);
+        this.logger.debug(`PUT ${path}`, targets);
 
         return this.http.authedRequest(Method.Put, path, undefined, body);
     }
@@ -9661,7 +9727,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @deprecated use supportsThreads() instead
      */
     public supportsExperimentalThreads(): boolean {
-        logger.warn(`supportsExperimentalThreads() is deprecated, use supportThreads() instead`);
+        this.logger.warn(`supportsExperimentalThreads() is deprecated, use supportThreads() instead`);
         return this.clientOpts?.experimentalThreadSupport || false;
     }
 
