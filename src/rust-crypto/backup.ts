@@ -29,7 +29,7 @@ import { logger } from "../logger";
 import { ClientPrefix, IHttpOpts, MatrixError, MatrixHttpApi, Method } from "../http-api";
 import { CryptoEvent, IMegolmSessionData } from "../crypto";
 import { TypedEventEmitter } from "../models/typed-event-emitter";
-import { encodeUri } from "../utils";
+import { encodeUri, immediate } from "../utils";
 import { OutgoingRequestProcessor } from "./OutgoingRequestProcessor";
 import { sleep } from "../utils";
 import { BackupDecryptor } from "../common-crypto/CryptoBackend";
@@ -95,11 +95,9 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
         const signatureVerification: SignatureVerification = await this.olmMachine.verifyBackup(info);
 
         const backupKeys: RustSdkCryptoJs.BackupKeys = await this.olmMachine.getBackupKeys();
-        const pubKeyForSavedPrivateKey = backupKeys?.decryptionKey?.megolmV1PublicKey;
+        const decryptionKey = backupKeys?.decryptionKey;
         const backupMatchesSavedPrivateKey =
-            info.algorithm === pubKeyForSavedPrivateKey?.algorithm &&
-            (info.auth_data as Curve25519AuthData)?.public_key === pubKeyForSavedPrivateKey.publicKeyBase64;
-
+            !!decryptionKey && backupInfoMatchesBackupDecryptionKey(info, decryptionKey);
         return {
             matchesDecryptionKey: backupMatchesSavedPrivateKey,
             trusted: signatureVerification.trusted(),
@@ -124,6 +122,48 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
         }
         return this.keyBackupCheckInProgress;
     }
+
+    /**
+     * Handles a backup secret received event and store it if it matches the current backup version.
+     *
+     * @param secret - The secret as received from a `m.secert.send` event for secret `m.megolm_backup.v1`.
+     * @returns true if the secret is valid and has been stored, false otherwise.
+     */
+    public async handleBackupSecretReceived(secret: string): Promise<boolean> {
+        // Currently we only receive the decryption key without any key backup version. It is important to
+        // check that the secret is valid for the current version before storing it.
+        // We force a check to ensure to have the latest version. We also want to check that the backup is trusted
+        // as we don't want to store the secret if the backup is not trusted, and eventually import megolm keys later from an untrusted backup.
+        const backupCheck = await this.checkKeyBackupAndEnable(true);
+
+        if (!backupCheck?.backupInfo?.version || !backupCheck.trustInfo.trusted) {
+            // There is no server-side key backup, or the backup is not signed by a trusted cross-signing key or trusted own device.
+            // This decryption key is useless to us.
+            logger.warn("Received backup decryption key, but there is no trusted server-side key backup");
+            return false;
+        }
+
+        try {
+            const backupDecryptionKey = RustSdkCryptoJs.BackupDecryptionKey.fromBase64(secret);
+            const privateKeyMatches = backupInfoMatchesBackupDecryptionKey(backupCheck.backupInfo, backupDecryptionKey);
+            if (!privateKeyMatches) {
+                logger.debug(`onReceiveSecret: backup decryption key does not match current backup version`);
+                // just ignore the secret
+                return false;
+            }
+            logger.info(
+                `handleBackupSecretReceived: A valid backup decryption key has been received and stored in cache.`,
+            );
+
+            await this.olmMachine.saveBackupDecryptionKey(backupDecryptionKey, backupCheck.backupInfo.version);
+            return true;
+        } catch (e) {
+            logger.warn("handleBackupSecretReceived: Invalid backup decryption key", e);
+        }
+
+        return false;
+    }
+
     private keyBackupCheckInProgress: Promise<KeyBackupCheck | null> | null = null;
 
     /** Helper for `checkKeyBackup` */
@@ -380,6 +420,25 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
 }
 
 /**
+ * Checks if the provided backup info matches the given private key.
+ *
+ * @param info - The backup info to check.
+ * @param backupDecryptionKey - The `BackupDecryptionKey` private key to check against.
+ * @returns `true` if the private key can decrypt the backup, `false` otherwise.
+ */
+function backupInfoMatchesBackupDecryptionKey(
+    info: KeyBackupInfo,
+    backupDecryptionKey: RustSdkCryptoJs.BackupDecryptionKey,
+): boolean {
+    if (info.algorithm !== "m.megolm_backup.v1.curve25519-aes-sha2") {
+        logger.warn("backupMatchesPrivateKey: Unsupported backup algorithm", info.algorithm);
+        return false;
+    }
+
+    return (info.auth_data as Curve25519AuthData)?.public_key === backupDecryptionKey.megolmV1PublicKey.publicKeyBase64;
+}
+
+/**
  * Implementation of {@link BackupDecryptor} for the rust crypto backend.
  */
 export class RustBackupDecryptor implements BackupDecryptor {
@@ -401,7 +460,7 @@ export class RustBackupDecryptor implements BackupDecryptor {
         for (const [sessionId, sessionData] of Object.entries(ciphertexts)) {
             try {
                 const decrypted = JSON.parse(
-                    await this.decryptionKey.decryptV1(
+                    this.decryptionKey.decryptV1(
                         sessionData.session_data.ephemeral,
                         sessionData.session_data.mac,
                         sessionData.session_data.ciphertext,
@@ -409,6 +468,9 @@ export class RustBackupDecryptor implements BackupDecryptor {
                 );
                 decrypted.session_id = sessionId;
                 keys.push(decrypted);
+
+                // there might be lots of sessions, so don't hog the event loop
+                await immediate();
             } catch (e) {
                 logger.log("Failed to decrypt megolm session from backup", e, sessionData);
             }
