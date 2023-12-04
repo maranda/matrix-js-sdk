@@ -28,7 +28,7 @@ import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 import { EventType } from "../@types/event";
 import { IContent, MatrixEvent } from "../models/event";
 import { Room } from "../models/room";
-import { Logger, logger } from "../logger";
+import { Logger, logger, LogSpan } from "../logger";
 import { KeyClaimManager } from "./KeyClaimManager";
 import { RoomMember } from "../models/room-member";
 import { HistoryVisibility } from "../@types/partials";
@@ -64,12 +64,13 @@ export class RoomEncryptor {
         // start tracking devices for any users already known to be in this room.
         // Do not load members here, would defeat lazy loading.
         const members = room.getJoinedMembers();
+
         // At this point just mark the known members as tracked, it might not be the full list of members
         // because of lazy loading. This is fine, because we will get a member list update when sending a message for
         // the first time, see `RoomEncryptor#ensureEncryptionSession`
-        this.olmMachine.updateTrackedUsers(members.map((u) => new RustSdkCryptoJs.UserId(u.userId))).then(() => {
-            this.prefixedLogger.debug(`Updated tracked users for room ${room.roomId}`);
-        });
+        this.olmMachine
+            .updateTrackedUsers(members.map((u) => new RustSdkCryptoJs.UserId(u.userId)))
+            .catch((e) => this.prefixedLogger.error("Error initializing tracked users", e));
     }
 
     /**
@@ -110,12 +111,27 @@ export class RoomEncryptor {
      *
      * @param globalBlacklistUnverifiedDevices - When `true`, it will not send encrypted messages to unverified devices
      */
-    public async ensureEncryptionSession(globalBlacklistUnverifiedDevices: boolean): Promise<void> {
+    public async prepareForEncryption(globalBlacklistUnverifiedDevices: boolean): Promise<void> {
+        const logger = new LogSpan(this.prefixedLogger, "prepareForEncryption");
+        await this.ensureEncryptionSession(logger, globalBlacklistUnverifiedDevices);
+    }
+
+    /**
+     * Prepare to encrypt events in this room.
+     *
+     * This ensures that we have a megolm session ready to use and that we have shared its key with all the devices
+     * in the room.
+     *
+     * @param logger - a place to write diagnostics to
+     * @param globalBlacklistUnverifiedDevices - When `true`, it will not send encrypted messages to unverified devices
+     */
+    private async ensureEncryptionSession(logger: LogSpan, globalBlacklistUnverifiedDevices: boolean): Promise<void> {
         if (this.encryptionSettings.algorithm !== "m.megolm.v1.aes-sha2") {
             throw new Error(
                 `Cannot encrypt in ${this.room.roomId} for unsupported algorithm '${this.encryptionSettings.algorithm}'`,
             );
         }
+        logger.debug("Starting encryption");
 
         const members = await this.room.getEncryptionTargetMembers();
 
@@ -127,28 +143,38 @@ export class RoomEncryptor {
         // not a particular problem, since `OlmMachine.updateTrackedUsers` just adds any users that weren't already tracked.
         if (!this.lazyLoadedMembersResolved) {
             await this.olmMachine.updateTrackedUsers(members.map((u) => new RustSdkCryptoJs.UserId(u.userId)));
+            logger.debug(`Updated tracked users`);
             this.lazyLoadedMembersResolved = true;
-            this.prefixedLogger.debug(`Updated tracked users for room ${this.room.roomId}`);
+
+            // Query keys in case we don't have them for newly tracked members.
+            // It's important after loading members for the first time, as likely most of them won't be
+            // known yet and will be unable to decrypt messages despite being in the room for long.
+            // This must be done before ensuring sessions. If not the devices of these users are not
+            // known yet and will not get the room key.
+            // We don't have API to only get the keys queries related to this member list, so we just
+            // process the pending requests from the olmMachine. (usually these are processed
+            // at the end of the sync, but we can't wait for that).
+            // XXX future improvement process only KeysQueryRequests for the users that have never been queried.
+            logger.debug(`Processing outgoing requests`);
+            await this.outgoingRequestManager.doProcessOutgoingRequests();
+        } else {
+            // If members are already loaded it's less critical to await on key queries.
+            // We might still want to trigger a processOutgoingRequests here.
+            // The call to `ensureSessionsForUsers` below will wait a bit on in-flight key queries we are
+            // interested in. If a sync handling happens in the meantime, and some new members are added to the room
+            // or have new devices it would give us a chance to query them before sending.
+            // It's less critical due to the racy nature of this process.
+            logger.debug(`Processing outgoing requests in background`);
+            this.outgoingRequestManager.doProcessOutgoingRequests();
         }
 
-        // Query keys in case we don't have them for newly tracked members.
-        // This must be done before ensuring sessions. If not the devices of these users are not
-        // known yet and will not get the room key.
-        // We don't have API to only get the keys queries related to this member list, so we just
-        // process the pending requests from the olmMachine. (usually these are processed
-        // at the end of the sync, but we can't wait for that).
-        // XXX future improvement process only KeysQueryRequests for the tracked users.
-        await this.outgoingRequestManager.doProcessOutgoingRequests();
-
-        this.prefixedLogger.debug(
+        logger.debug(
             `Encrypting for users (shouldEncryptForInvitedMembers: ${this.room.shouldEncryptForInvitedMembers()}):`,
             members.map((u) => `${u.userId} (${u.membership})`),
         );
 
         const userList = members.map((u) => new UserId(u.userId));
-        await this.keyClaimManager.ensureSessionsForUsers(userList);
-
-        this.prefixedLogger.debug("Sessions for users are ready; now sharing room key");
+        await this.keyClaimManager.ensureSessionsForUsers(logger, userList);
 
         const rustEncryptionSettings = new EncryptionSettings();
         rustEncryptionSettings.historyVisibility = toRustHistoryVisibility(this.room.getHistoryVisibility());
@@ -204,8 +230,10 @@ export class RoomEncryptor {
      * @param globalBlacklistUnverifiedDevices - When `true`, it will not send encrypted messages to unverified devices
      */
     public async encryptEvent(event: MatrixEvent, globalBlacklistUnverifiedDevices: boolean): Promise<void> {
-        await this.ensureEncryptionSession(globalBlacklistUnverifiedDevices);
+        const logger = new LogSpan(this.prefixedLogger, event.getTxnId() ?? "");
+        await this.ensureEncryptionSession(logger, globalBlacklistUnverifiedDevices);
 
+        logger.debug("Encrypting actual message content");
         const encryptedContent = await this.olmMachine.encryptRoomEvent(
             new RoomId(this.room.roomId),
             event.getType(),
@@ -218,6 +246,8 @@ export class RoomEncryptor {
             this.olmMachine.identityKeys.curve25519.toBase64(),
             this.olmMachine.identityKeys.ed25519.toBase64(),
         );
+
+        logger.debug("Encrypted event successfully");
     }
 }
 
