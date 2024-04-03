@@ -25,6 +25,7 @@ import { UserTrustLevel } from "../../src/crypto/CrossSigning";
 import { CryptoBackend } from "../../src/common-crypto/CryptoBackend";
 import { EventDecryptionResult } from "../../src/common-crypto/CryptoBackend";
 import * as testData from "../test-utils/test-data";
+import { KnownMembership } from "../../src/@types/membership";
 
 const Olm = global.Olm;
 
@@ -463,7 +464,7 @@ describe("Crypto", function () {
                     type: "m.room.member",
                     sender: "@alice:example.com",
                     room_id: roomId,
-                    content: { membership: "invite" },
+                    content: { membership: KnownMembership.Invite },
                     state_key: "@bob:example.com",
                 }),
             ]);
@@ -795,7 +796,7 @@ describe("Crypto", function () {
                     type: "m.room.member",
                     sender: "@clara:example.com",
                     room_id: roomId,
-                    content: { membership: "invite" },
+                    content: { membership: KnownMembership.Invite },
                     state_key: "@bob:example.com",
                 }),
             ]);
@@ -1263,7 +1264,7 @@ describe("Crypto", function () {
                     ({
                         init_with_private_key: jest.fn(),
                         free,
-                    } as unknown as PkDecryption),
+                    }) as unknown as PkDecryption,
             );
             client.client.checkSecretStoragePrivateKey(new Uint8Array(), "");
             expect(free).toHaveBeenCalled();
@@ -1289,7 +1290,7 @@ describe("Crypto", function () {
                     ({
                         init_with_seed: jest.fn(),
                         free,
-                    } as unknown as PkSigning),
+                    }) as unknown as PkSigning,
             );
             client.client.checkCrossSigningPrivateKey(new Uint8Array(), "");
             expect(free).toHaveBeenCalled();

@@ -21,6 +21,7 @@ import {
     IDeviceData,
     IProblem,
     ISession,
+    SessionExtended,
     ISessionInfo,
     IWithheld,
     MigrationState,
@@ -29,6 +30,7 @@ import {
     ParkedSharedHistory,
     SecretStorePrivateKeys,
     SESSION_BATCH_SIZE,
+    ACCOUNT_OBJECT_KEY_MIGRATION_STATE,
 } from "./base";
 import { IRoomKeyRequestBody, IRoomKeyRequestRecipient } from "../index";
 import { ICrossSigningKey } from "../../client";
@@ -38,9 +40,6 @@ import { InboundGroupSessionData } from "../OlmDevice";
 import { IndexedDBCryptoStore } from "./indexeddb-crypto-store";
 
 const PROFILE_TRANSACTIONS = false;
-
-/* Keys for the `account` object store */
-const ACCOUNT_OBJECT_KEY_MIGRATION_STATE = "migrationState";
 
 /**
  * Implementation of a CryptoStore which is backed by an existing
@@ -811,33 +810,62 @@ export class Backend implements CryptoStore {
     }
 
     /**
+     * Count the number of Megolm sessions in the database.
+     *
+     * Implementation of {@link CryptoStore.countEndToEndInboundGroupSessions}.
+     *
+     * @internal
+     */
+    public async countEndToEndInboundGroupSessions(): Promise<number> {
+        let result = 0;
+        await this.doTxn("readonly", [IndexedDBCryptoStore.STORE_INBOUND_GROUP_SESSIONS], (txn) => {
+            const sessionStore = txn.objectStore(IndexedDBCryptoStore.STORE_INBOUND_GROUP_SESSIONS);
+            const countReq = sessionStore.count();
+            countReq.onsuccess = (): void => {
+                result = countReq.result;
+            };
+        });
+        return result;
+    }
+
+    /**
      * Fetch a batch of Megolm sessions from the database.
      *
      * Implementation of {@link CryptoStore.getEndToEndInboundGroupSessionsBatch}.
      */
-    public async getEndToEndInboundGroupSessionsBatch(): Promise<null | ISession[]> {
-        const result: ISession[] = [];
-        await this.doTxn("readonly", [IndexedDBCryptoStore.STORE_INBOUND_GROUP_SESSIONS], (txn) => {
-            const objectStore = txn.objectStore(IndexedDBCryptoStore.STORE_INBOUND_GROUP_SESSIONS);
-            const getReq = objectStore.openCursor();
-            getReq.onsuccess = function (): void {
-                try {
-                    const cursor = getReq.result;
-                    if (cursor) {
-                        result.push({
-                            senderKey: cursor.value.senderCurve25519Key,
-                            sessionId: cursor.value.sessionId,
-                            sessionData: cursor.value.session,
-                        });
-                        if (result.length < SESSION_BATCH_SIZE) {
-                            cursor.continue();
+    public async getEndToEndInboundGroupSessionsBatch(): Promise<null | SessionExtended[]> {
+        const result: SessionExtended[] = [];
+        await this.doTxn(
+            "readonly",
+            [IndexedDBCryptoStore.STORE_INBOUND_GROUP_SESSIONS, IndexedDBCryptoStore.STORE_BACKUP],
+            (txn) => {
+                const sessionStore = txn.objectStore(IndexedDBCryptoStore.STORE_INBOUND_GROUP_SESSIONS);
+                const backupStore = txn.objectStore(IndexedDBCryptoStore.STORE_BACKUP);
+
+                const getReq = sessionStore.openCursor();
+                getReq.onsuccess = function (): void {
+                    try {
+                        const cursor = getReq.result;
+                        if (cursor) {
+                            const backupGetReq = backupStore.get(cursor.key);
+                            backupGetReq.onsuccess = (): void => {
+                                result.push({
+                                    senderKey: cursor.value.senderCurve25519Key,
+                                    sessionId: cursor.value.sessionId,
+                                    sessionData: cursor.value.session,
+                                    needsBackup: backupGetReq.result !== undefined,
+                                });
+                                if (result.length < SESSION_BATCH_SIZE) {
+                                    cursor.continue();
+                                }
+                            };
                         }
+                    } catch (e) {
+                        abortWithException(txn, <Error>e);
                     }
-                } catch (e) {
-                    abortWithException(txn, <Error>e);
-                }
-            };
-        });
+                };
+            },
+        );
 
         if (result.length === 0) {
             // No sessions left.

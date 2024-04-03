@@ -33,8 +33,8 @@ interface TypedResponse<T> extends Response {
 export type ResponseType<T, O extends IHttpOpts> = O extends undefined
     ? T
     : O extends { onlyData: true }
-    ? T
-    : TypedResponse<T>;
+      ? T
+      : TypedResponse<T>;
 
 export class FetchHttpApi<O extends IHttpOpts> {
     private abortController = new AbortController();
@@ -111,8 +111,8 @@ export class FetchHttpApi<O extends IHttpOpts> {
      *
      * @param body - The HTTP JSON body.
      *
-     * @param opts - additional options.
-     * When `opts.doNotAttemptTokenRefresh` is true, token refresh will not be attempted
+     * @param paramOpts - additional options.
+     * When `paramOpts.doNotAttemptTokenRefresh` is true, token refresh will not be attempted
      * when an expired token is encountered. Used to only attempt token refresh once.
      *
      * @returns Promise which resolves to
