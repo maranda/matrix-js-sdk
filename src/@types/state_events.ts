@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 import { RoomType } from "./event";
-import { GuestAccess, HistoryVisibility, RestrictedAllowType } from "./partials";
+import { GuestAccess, HistoryVisibility, JoinRule, RestrictedAllowType } from "./partials";
 import { ImageInfo } from "./media";
 import { PolicyRecommendation } from "../models/invites-ignorer";
 
@@ -36,6 +36,7 @@ export interface RoomCreateEventContent {
 }
 
 export interface RoomJoinRulesEventContent {
+    join_rule: JoinRule;
     allow?: {
         room_id: string;
         type: RestrictedAllowType;
@@ -94,7 +95,9 @@ export interface RoomTopicEventContent {
 
 export interface RoomAvatarEventContent {
     url?: string;
-    info?: ImageInfo;
+    // The spec says that an encrypted file can be used for the thumbnail but this isn't true
+    // https://github.com/matrix-org/matrix-spec/issues/562 so omit those fields
+    info?: Omit<ImageInfo, "thumbnail_file">;
 }
 
 export interface RoomPinnedEventsEventContent {

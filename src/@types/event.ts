@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { UnstableValue } from "../NamespacedValue";
+import { NamespacedValue, UnstableValue } from "../NamespacedValue";
 import {
     PolicyRuleEventContent,
     RoomAvatarEventContent,
@@ -56,8 +56,8 @@ import {
     SDPStreamMetadataKey,
 } from "../webrtc/callEventTypes";
 import { EncryptionKeysEventContent, ICallNotifyContent } from "../matrixrtc/types";
-import { EncryptedFile } from "./media";
 import { M_POLL_END, M_POLL_START, PollEndEventContent, PollStartEventContent } from "./polls";
+import { SessionMembershipData } from "../matrixrtc/CallMembership";
 
 export enum EventType {
     // Room state events
@@ -303,12 +303,7 @@ export const UNSIGNED_THREAD_ID_FIELD = new UnstableValue("thread_id", "org.matr
  *
  * @experimental
  */
-export const UNSIGNED_MEMBERSHIP_FIELD = new UnstableValue("membership", "io.element.msc4115.membership");
-
-/**
- * @deprecated in favour of {@link EncryptedFile}
- */
-export type IEncryptedFile = EncryptedFile;
+export const UNSIGNED_MEMBERSHIP_FIELD = new NamespacedValue("membership", "io.element.msc4115.membership");
 
 /**
  * Mapped type from event type to content type for all specified non-state room events.
@@ -362,7 +357,10 @@ export interface StateEvents {
 
     // MSC3401
     [EventType.GroupCallPrefix]: IGroupCallRoomState;
-    [EventType.GroupCallMemberPrefix]: XOR<IGroupCallRoomMemberState, ExperimentalGroupCallRoomMemberState>;
+    [EventType.GroupCallMemberPrefix]: XOR<
+        XOR<IGroupCallRoomMemberState, ExperimentalGroupCallRoomMemberState>,
+        XOR<SessionMembershipData, {}>
+    >;
 
     // MSC3089
     [UNSTABLE_MSC3089_BRANCH.name]: MSC3089EventContent;

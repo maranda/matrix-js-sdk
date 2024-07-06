@@ -14,15 +14,16 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import type { IMegolmSessionData } from "./@types/crypto";
-import { Room } from "./models/room";
-import { DeviceMap } from "./models/device";
-import { UIAuthCallback } from "./interactive-auth";
-import { PassphraseInfo, SecretStorageCallbacks, SecretStorageKeyDescription } from "./secret-storage";
-import { VerificationRequest } from "./crypto-api/verification";
-import { BackupTrustInfo, KeyBackupCheck, KeyBackupInfo } from "./crypto-api/keybackup";
-import { ISignatures } from "./@types/signed";
-import { MatrixEvent } from "./models/event";
+import type { SecretsBundle } from "@matrix-org/matrix-sdk-crypto-wasm";
+import type { IMegolmSessionData } from "../@types/crypto";
+import { Room } from "../models/room";
+import { DeviceMap } from "../models/device";
+import { UIAuthCallback } from "../interactive-auth";
+import { PassphraseInfo, SecretStorageCallbacks, SecretStorageKeyDescription } from "../secret-storage";
+import { VerificationRequest } from "./verification";
+import { BackupTrustInfo, KeyBackupCheck, KeyBackupInfo } from "./keybackup";
+import { ISignatures } from "../@types/signed";
+import { MatrixEvent } from "../models/event";
 
 /**
  * Public interface to the cryptography parts of the js-sdk
@@ -532,6 +533,23 @@ export interface CryptoApi {
      *   to false.
      */
     startDehydration(createNewKey?: boolean): Promise<void>;
+
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+    //
+    // Import/export of secret keys
+    //
+    ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+    /**
+     * Export secrets bundle for transmitting to another device as part of OIDC QR login
+     */
+    exportSecretsBundle?(): Promise<Awaited<ReturnType<SecretsBundle["to_json"]>>>;
+
+    /**
+     * Import secrets bundle transmitted from another device.
+     * @param secrets - The secrets bundle received from the other device
+     */
+    importSecretsBundle?(secrets: Awaited<ReturnType<SecretsBundle["to_json"]>>): Promise<void>;
 }
 
 /** A reason code for a failure to decrypt an event. */
@@ -931,5 +949,5 @@ export interface OwnDeviceKeys {
     curve25519: string;
 }
 
-export * from "./crypto-api/verification";
-export * from "./crypto-api/keybackup";
+export * from "./verification";
+export * from "./keybackup";

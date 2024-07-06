@@ -77,7 +77,6 @@ export interface IUnsigned {
     "invite_room_state"?: StrippedState[];
     "m.relations"?: Record<RelationType | string, any>; // No common pattern for aggregated relations
     [UNSIGNED_THREAD_ID_FIELD.name]?: string;
-    [UNSIGNED_MEMBERSHIP_FIELD.name]?: Membership | string;
 }
 
 export interface IThreadBundledRelationship {
@@ -98,19 +97,6 @@ export interface IEvent {
     membership?: Membership;
     unsigned: IUnsigned;
     redacts?: string;
-
-    /**
-     * @deprecated in favour of `sender`
-     */
-    user_id?: string;
-    /**
-     * @deprecated in favour of `unsigned.prev_content`
-     */
-    prev_content?: IContent;
-    /**
-     * @deprecated in favour of `origin_server_ts`
-     */
-    age?: number;
 }
 
 export interface IAggregatedRelation {
@@ -495,7 +481,7 @@ export class MatrixEvent extends TypedEventEmitter<MatrixEventEmittedEvents, Mat
      * @returns The user ID, e.g. `@alice:matrix.org`
      */
     public getSender(): string | undefined {
-        return this.event.sender || this.event.user_id; // v2 / v1
+        return this.event.sender; // v2 / v1
     }
 
     /**
@@ -669,7 +655,7 @@ export class MatrixEvent extends TypedEventEmitter<MatrixEventEmittedEvents, Mat
      */
     public getPrevContent(): IContent {
         // v2 then v1 then default
-        return this.getUnsigned().prev_content || this.event.prev_content || {};
+        return this.getUnsigned().prev_content || {};
     }
 
     /**
@@ -693,7 +679,7 @@ export class MatrixEvent extends TypedEventEmitter<MatrixEventEmittedEvents, Mat
      * @returns The age of this event in milliseconds.
      */
     public getAge(): number | undefined {
-        return this.getUnsigned().age || this.event.age; // v2 / v1
+        return this.getUnsigned().age;
     }
 
     /**
@@ -730,13 +716,9 @@ export class MatrixEvent extends TypedEventEmitter<MatrixEventEmittedEvents, Mat
      * @returns The user's room membership, or `undefined` if the server does
      *   not report it.
      */
-    public getMembershipAtEvent(): Membership | string | undefined {
+    public getMembershipAtEvent(): Optional<Membership | string> {
         const unsigned = this.getUnsigned();
-        if (typeof unsigned[UNSIGNED_MEMBERSHIP_FIELD.name] === "string") {
-            return unsigned[UNSIGNED_MEMBERSHIP_FIELD.name];
-        } else {
-            return undefined;
-        }
+        return UNSIGNED_MEMBERSHIP_FIELD.findIn<Membership | string>(unsigned);
     }
 
     /**
@@ -1084,7 +1066,7 @@ export class MatrixEvent extends TypedEventEmitter<MatrixEventEmittedEvents, Mat
      * signing the public curve25519 key with the ed25519 key.
      *
      * In general, applications should not use this method directly, but should
-     * instead use {@link CryptoApi#getEncryptionInfoForEvent}.
+     * instead use {@link Crypto.CryptoApi#getEncryptionInfoForEvent}.
      */
     public getClaimedEd25519Key(): string | null {
         return this.claimedEd25519Key;

@@ -386,6 +386,9 @@ describe("MatrixClient", function () {
             expect(client.mxcUrlToHttp(mxc, 32, 46, "scale", false, true)).toBe(
                 getHttpUriForMxc(client.baseUrl, mxc, 32, 46, "scale", false, true),
             );
+            expect(client.mxcUrlToHttp(mxc, 32, 46, "scale", false, true, true)).toBe(
+                getHttpUriForMxc(client.baseUrl, mxc, 32, 46, "scale", false, true, true),
+            );
         });
     });
 
@@ -1557,7 +1560,6 @@ describe("MatrixClient", function () {
                     },
                 },
                 event_id: "$ev1",
-                user_id: "@alice:matrix.org",
             });
 
             expect(rootEvent.isThreadRoot).toBe(true);

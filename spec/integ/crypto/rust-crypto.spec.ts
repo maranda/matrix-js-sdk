@@ -23,6 +23,7 @@ import { populateStore } from "../../test-utils/test_indexeddb_cryptostore_dump"
 import { MSK_NOT_CACHED_DATASET } from "../../test-utils/test_indexeddb_cryptostore_dump/no_cached_msk_dump";
 import { IDENTITY_NOT_TRUSTED_DATASET } from "../../test-utils/test_indexeddb_cryptostore_dump/unverified";
 import { FULL_ACCOUNT_DATASET } from "../../test-utils/test_indexeddb_cryptostore_dump/full_account";
+import { EMPTY_ACCOUNT_DATASET } from "../../test-utils/test_indexeddb_cryptostore_dump/empty_account";
 
 jest.setTimeout(15000);
 
@@ -65,18 +66,36 @@ describe("MatrixClient.initRustCrypto", () => {
         expect(databaseNames).toEqual(expect.arrayContaining(["matrix-js-sdk::matrix-sdk-crypto"]));
     });
 
-    it("should create the meta db if given a pickleKey", async () => {
+    it("should create the meta db if given a storageKey", async () => {
         const matrixClient = createClient({
             baseUrl: "http://test.server",
             userId: "@alice:localhost",
             deviceId: "aliceDevice",
-            pickleKey: "testKey",
         });
 
         // No databases.
         expect(await indexedDB.databases()).toHaveLength(0);
 
-        await matrixClient.initRustCrypto();
+        await matrixClient.initRustCrypto({ storageKey: new Uint8Array(32) });
+
+        // should have two indexed dbs now
+        const databaseNames = (await indexedDB.databases()).map((db) => db.name);
+        expect(databaseNames).toEqual(
+            expect.arrayContaining(["matrix-js-sdk::matrix-sdk-crypto", "matrix-js-sdk::matrix-sdk-crypto-meta"]),
+        );
+    });
+
+    it("should create the meta db if given a storagePassword", async () => {
+        const matrixClient = createClient({
+            baseUrl: "http://test.server",
+            userId: "@alice:localhost",
+            deviceId: "aliceDevice",
+        });
+
+        // No databases.
+        expect(await indexedDB.databases()).toHaveLength(0);
+
+        await matrixClient.initRustCrypto({ storagePassword: "the cow is on the moon" });
 
         // should have two indexed dbs now
         const databaseNames = (await indexedDB.databases()).map((db) => db.name);
@@ -266,6 +285,38 @@ describe("MatrixClient.initRustCrypto", () => {
             });
         });
 
+        it("should not migrate if account data is missing", async () => {
+            // See https://github.com/element-hq/element-web/issues/27447
+
+            // Given we have an almost-empty legacy account in the database
+            fetchMock.get("path:/_matrix/client/v3/room_keys/version", {
+                status: 404,
+                body: { errcode: "M_NOT_FOUND", error: "No backup found" },
+            });
+            fetchMock.post("path:/_matrix/client/v3/keys/query", EMPTY_ACCOUNT_DATASET.keyQueryResponse);
+
+            const testStoreName = "test-store";
+            await populateStore(testStoreName, EMPTY_ACCOUNT_DATASET.dumpPath);
+            const cryptoStore = new IndexedDBCryptoStore(indexedDB, testStoreName);
+
+            const matrixClient = createClient({
+                baseUrl: "http://test.server",
+                userId: EMPTY_ACCOUNT_DATASET.userId,
+                deviceId: EMPTY_ACCOUNT_DATASET.deviceId,
+                cryptoStore,
+                pickleKey: EMPTY_ACCOUNT_DATASET.pickleKey,
+            });
+
+            // When we start Rust crypto, potentially triggering an upgrade
+            const progressListener = jest.fn();
+            matrixClient.addListener(CryptoEvent.LegacyCryptoStoreMigrationProgress, progressListener);
+
+            await matrixClient.initRustCrypto();
+
+            // Then no error occurs, and no upgrade happens
+            expect(progressListener.mock.calls.length).toBe(0);
+        }, 60000);
+
         describe("Legacy trust migration", () => {
             async function populateAndStartLegacyCryptoStore(dumpPath: string): Promise<IndexedDBCryptoStore> {
                 const testStoreName = "test-store";
@@ -399,10 +450,9 @@ describe("MatrixClient.clearStores", () => {
             baseUrl: "http://test.server",
             userId: "@alice:localhost",
             deviceId: "aliceDevice",
-            pickleKey: "testKey",
         });
 
-        await matrixClient.initRustCrypto();
+        await matrixClient.initRustCrypto({ storagePassword: "testKey" });
         expect(await indexedDB.databases()).toHaveLength(2);
         await matrixClient.stopClient();
 

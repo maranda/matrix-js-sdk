@@ -407,9 +407,12 @@ export async function logDuration<T>(logger: BaseLogger, name: string, block: ()
 
 /**
  * Promise/async version of {@link setImmediate}.
+ *
+ * Implementation is based on `setTimeout` for wider compatibility.
+ * @deprecated Use {@link sleep} instead.
  */
 export function immediate(): Promise<void> {
-    return new Promise(setImmediate);
+    return new Promise((resolve) => setTimeout(resolve));
 }
 
 export function isNullOrUndefined(val: any): boolean {
@@ -748,12 +751,7 @@ export function safeSet<O extends Record<any, any>, K extends keyof O>(obj: O, p
 }
 
 export function noUnsafeEventProps(event: Partial<IEvent>): boolean {
-    return !(
-        unsafeProp(event.room_id) ||
-        unsafeProp(event.sender) ||
-        unsafeProp(event.user_id) ||
-        unsafeProp(event.event_id)
-    );
+    return !(unsafeProp(event.room_id) || unsafeProp(event.sender) || unsafeProp(event.event_id));
 }
 
 export class MapWithDefault<K, V> extends Map<K, V> {

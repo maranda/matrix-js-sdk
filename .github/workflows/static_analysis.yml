@@ -18,6 +18,7 @@ jobs:
             - uses: actions/setup-node@v4
               with:
                   cache: "yarn"
+                  node-version-file: package.json
 
             - name: Install Deps
               run: "yarn install"
@@ -44,6 +45,7 @@ jobs:
             - uses: actions/setup-node@v4
               with:
                   cache: "yarn"
+                  node-version-file: package.json
 
             - name: Install Deps
               run: "yarn install"
@@ -60,6 +62,7 @@ jobs:
             - uses: actions/setup-node@v4
               with:
                   cache: "yarn"
+                  node-version-file: package.json
 
             - name: Install Deps
               run: "yarn install --frozen-lockfile"
@@ -76,12 +79,13 @@ jobs:
             - uses: actions/setup-node@v4
               with:
                   cache: "yarn"
+                  node-version-file: package.json
 
             - name: Install Deps
               run: "yarn install"
 
             - name: Generate Docs
-              run: "yarn run gendoc --treatWarningsAsErrors"
+              run: "yarn run gendoc --treatWarningsAsErrors --suppressCommentWarningsInDeclarationFiles"
 
             - name: Upload Artifact
               uses: actions/upload-artifact@v4
@@ -100,6 +104,7 @@ jobs:
             - uses: actions/setup-node@v4
               with:
                   cache: "yarn"
+                  node-version-file: package.json
 
             - name: Install Deps
               run: "yarn install --frozen-lockfile"

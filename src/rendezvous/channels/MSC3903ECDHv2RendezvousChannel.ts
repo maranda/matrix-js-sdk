@@ -17,16 +17,15 @@ limitations under the License.
 import { SAS } from "@matrix-org/olm";
 
 import {
-    RendezvousError,
-    RendezvousCode,
-    RendezvousIntent,
+    LegacyRendezvousFailureReason as RendezvousFailureReason,
     RendezvousChannel,
-    RendezvousTransportDetails,
+    RendezvousCode,
+    RendezvousError,
+    RendezvousIntent,
     RendezvousTransport,
-    RendezvousFailureReason,
+    RendezvousTransportDetails,
 } from "..";
-import { encodeUnpaddedBase64, decodeBase64 } from "../../base64";
-import { crypto, subtleCrypto, TextEncoder } from "../../crypto/crypto";
+import { decodeBase64, encodeUnpaddedBase64 } from "../../base64";
 import { generateDecimalSas } from "../../crypto/verification/SASDecimal";
 import { UnstableValue } from "../../NamespacedValue";
 
@@ -56,11 +55,11 @@ export interface EncryptedPayload {
 }
 
 async function importKey(key: Uint8Array): Promise<CryptoKey> {
-    if (!subtleCrypto) {
+    if (!globalThis.crypto.subtle) {
         throw new Error("Web Crypto is not available");
     }
 
-    const imported = subtleCrypto.importKey("raw", key, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+    const imported = globalThis.crypto.subtle.importKey("raw", key, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 
     return imported;
 }
@@ -69,6 +68,9 @@ async function importKey(key: Uint8Array): Promise<CryptoKey> {
  * Implementation of the unstable [MSC3903](https://github.com/matrix-org/matrix-spec-proposals/pull/3903)
  * X25519/ECDH key agreement based secure rendezvous channel.
  * Note that this is UNSTABLE and may have breaking changes without notice.
+ * MSC3886/MSC3903/MSC3906 are now closed and so this functionality will be removed in future.
+ * However, we want to keep this implementation around for some time.
+ * TODO: define an end-of-life date for this implementation.
  */
 export class MSC3903ECDHv2RendezvousChannel<T> implements RendezvousChannel<T> {
     private olmSAS?: SAS;
@@ -161,16 +163,16 @@ export class MSC3903ECDHv2RendezvousChannel<T> implements RendezvousChannel<T> {
     }
 
     private async encrypt(data: T): Promise<MSC3903ECDHPayload> {
-        if (!subtleCrypto) {
+        if (!globalThis.crypto.subtle) {
             throw new Error("Web Crypto is not available");
         }
 
         const iv = new Uint8Array(32);
-        crypto.getRandomValues(iv);
+        globalThis.crypto.getRandomValues(iv);
 
         const encodedData = new TextEncoder().encode(JSON.stringify(data));
 
-        const ciphertext = await subtleCrypto.encrypt(
+        const ciphertext = await globalThis.crypto.subtle.encrypt(
             {
                 name: "AES-GCM",
                 iv,
@@ -205,11 +207,11 @@ export class MSC3903ECDHv2RendezvousChannel<T> implements RendezvousChannel<T> {
 
         const ciphertextBytes = decodeBase64(ciphertext);
 
-        if (!subtleCrypto) {
+        if (!globalThis.crypto.subtle) {
             throw new Error("Web Crypto is not available");
         }
 
-        const plaintext = await subtleCrypto.decrypt(
+        const plaintext = await globalThis.crypto.subtle.decrypt(
             {
                 name: "AES-GCM",
                 iv: decodeBase64(iv),

@@ -41,7 +41,7 @@ import {
     RelationType,
     UNSIGNED_THREAD_ID_FIELD,
 } from "../@types/event";
-import { IRoomVersionsCapability, MatrixClient, PendingEventOrdering, RoomVersionStability } from "../client";
+import { MatrixClient, PendingEventOrdering } from "../client";
 import { GuestAccess, HistoryVisibility, JoinRule, ResizeMethod } from "../@types/partials";
 import { Filter, IFilterDefinition } from "../filter";
 import { RoomState, RoomStateEvent, RoomStateEventHandlerMap } from "./room-state";
@@ -70,6 +70,7 @@ import { RoomReceipts } from "./room-receipts";
 import { compareEventOrdering } from "./compare-event-ordering";
 import * as utils from "../utils";
 import { KnownMembership, Membership } from "../@types/membership";
+import { Capabilities, IRoomVersionsCapability, RoomVersionStability } from "../serverCapabilities";
 
 // These constants are used as sane defaults when the homeserver doesn't support
 // the m.room_versions capability. In practice, KNOWN_SAFE_ROOM_VERSION should be
@@ -208,7 +209,7 @@ export type RoomEventHandlerMap = {
      * });
      * ```
      */
-    [RoomEvent.AccountData]: (event: MatrixEvent, room: Room, lastEvent?: MatrixEvent) => void;
+    [RoomEvent.AccountData]: (event: MatrixEvent, room: Room, prevEvent?: MatrixEvent) => void;
     /**
      * Fires whenever a receipt is received for a room
      * @param event - The receipt event
@@ -397,19 +398,14 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      *             Use getLiveTimeline().getState(EventTimeline.FORWARDS) instead.
      */
     public currentState!: RoomState;
-    public readonly relations = new RelationsContainer(this.client, this);
+
+    public readonly relations;
 
     /**
      * A collection of events known by the client
      * This is not a comprehensive list of the threads that exist in this room
      */
     private threads = new Map<string, Thread>();
-
-    /**
-     * @deprecated This value is unreliable. It may not contain the last thread.
-     *             Use {@link Room.getLastThread} instead.
-     */
-    public lastThread?: Thread;
 
     /**
      * A mapping of eventId to all visibility changes to apply
@@ -465,6 +461,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         private readonly opts: IOpts = {},
     ) {
         super();
+
         // In some cases, we add listeners for every displayed Matrix event, so it's
         // common to have quite a few more than the default limit.
         this.setMaxListeners(100);
@@ -474,6 +471,8 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
 
         this.name = roomId;
         this.normalizedName = roomId;
+
+        this.relations = new RelationsContainer(this.client, this);
 
         // Listen to our own receipt event as a more modular way of processing our own
         // receipts. No need to remove the listener: it's on ourself anyway.
@@ -606,27 +605,6 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
     }
 
     /**
-     * Determines whether this room needs to be upgraded to a new version
-     * @returns What version the room should be upgraded to, or null if
-     *     the room does not require upgrading at this time.
-     * @deprecated Use #getRecommendedVersion() instead
-     */
-    public shouldUpgradeToVersion(): string | null {
-        // TODO: Remove this function.
-        // This makes assumptions about which versions are safe, and can easily
-        // be wrong. Instead, people are encouraged to use getRecommendedVersion
-        // which determines a safer value. This function doesn't use that function
-        // because this is not async-capable, and to avoid breaking the contract
-        // we're deprecating this.
-
-        if (!SAFE_ROOM_VERSIONS.includes(this.getVersion())) {
-            return KNOWN_SAFE_ROOM_VERSION;
-        }
-
-        return null;
-    }
-
-    /**
      * Determines the recommended room version for the room. This returns an
      * object with 3 properties: `version` as the new version the
      * room should be upgraded to (may be the same as the current version);
@@ -638,7 +616,10 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * Resolves to the version the room should be upgraded to.
      */
     public async getRecommendedVersion(): Promise<IRecommendedVersion> {
-        const capabilities = await this.client.getCapabilities();
+        let capabilities: Capabilities = {};
+        try {
+            capabilities = await this.client.getCapabilities();
+        } catch (e) {}
         let versionCap = capabilities["m.room_versions"];
         if (!versionCap) {
             versionCap = {
@@ -663,8 +644,12 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                     "to be supporting a newer room version we don't know about.",
             );
 
-            const caps = await this.client.getCapabilities(true);
-            versionCap = caps["m.room_versions"];
+            try {
+                capabilities = await this.client.fetchCapabilities();
+            } catch (e) {
+                logger.warn("Failed to refresh room version capabilities", e);
+            }
+            versionCap = capabilities["m.room_versions"];
             if (!versionCap) {
                 logger.warn("No room version capability - assuming upgrade required.");
                 return result;
@@ -1401,32 +1386,6 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 this.setThreadUnreadNotificationCount(threadId, NotificationCountType.Highlight, highlightCount);
             }
         }
-    }
-
-    /**
-     * Returns whether there are any devices in the room that are unverified
-     *
-     * Note: Callers should first check if crypto is enabled on this device. If it is
-     * disabled, then we aren't tracking room devices at all, so we can't answer this, and an
-     * error will be thrown.
-     *
-     * @returns the result
-     *
-     * @deprecated Not supported under rust crypto. Instead, call {@link Room.getEncryptionTargetMembers},
-     * {@link CryptoApi.getUserDeviceInfo}, and {@link CryptoApi.getDeviceVerificationStatus}.
-     */
-    public async hasUnverifiedDevices(): Promise<boolean> {
-        if (!this.hasEncryptionStateEvent()) {
-            return false;
-        }
-        const e2eMembers = await this.getEncryptionTargetMembers();
-        for (const member of e2eMembers) {
-            const devices = this.client.getStoredDevicesForUser(member.userId);
-            if (devices.some((device) => device.isUnverified())) {
-                return true;
-            }
-        }
-        return false;
     }
 
     /**
@@ -2479,15 +2438,6 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         // and pass the event through this.
         thread.addEvents(events, false);
 
-        const isNewer =
-            this.lastThread?.rootEvent &&
-            rootEvent?.localTimestamp &&
-            this.lastThread.rootEvent?.localTimestamp < rootEvent?.localTimestamp;
-
-        if (!this.lastThread || isNewer) {
-            this.lastThread = thread;
-        }
-
         // We need to update the thread root events, but the thread may not be ready yet.
         // If it isn't, it will fire ThreadEvent.Update when it is and we'll call updateThreadRootEvents then.
         if (this.threadsReady && thread.initialEventsFetched) {
@@ -2917,39 +2867,8 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * @param addLiveEventOptions - addLiveEvent options
      * @throws If `duplicateStrategy` is not falsey, 'replace' or 'ignore'.
      */
-    public async addLiveEvents(events: MatrixEvent[], addLiveEventOptions?: IAddLiveEventOptions): Promise<void>;
-    /**
-     * @deprecated In favor of the overload with `IAddLiveEventOptions`
-     */
-    public async addLiveEvents(
-        events: MatrixEvent[],
-        duplicateStrategy?: DuplicateStrategy,
-        fromCache?: boolean,
-    ): Promise<void>;
-    public async addLiveEvents(
-        events: MatrixEvent[],
-        duplicateStrategyOrOpts?: DuplicateStrategy | IAddLiveEventOptions,
-        fromCache = false,
-    ): Promise<void> {
-        let duplicateStrategy: DuplicateStrategy | undefined = duplicateStrategyOrOpts as DuplicateStrategy;
-        let timelineWasEmpty: boolean | undefined = false;
-        if (typeof duplicateStrategyOrOpts === "object") {
-            ({
-                duplicateStrategy,
-                fromCache = false,
-                /* roomState, (not used here) */
-                timelineWasEmpty,
-            } = duplicateStrategyOrOpts);
-        } else if (duplicateStrategyOrOpts !== undefined) {
-            // Deprecation warning
-            // FIXME: Remove after 2023-06-01 (technical debt)
-            logger.warn(
-                "Overload deprecated: " +
-                    "`Room.addLiveEvents(events, duplicateStrategy?, fromCache?)` " +
-                    "is deprecated in favor of the overload with `Room.addLiveEvents(events, IAddLiveEventOptions)`",
-            );
-        }
-
+    public async addLiveEvents(events: MatrixEvent[], addLiveEventOptions?: IAddLiveEventOptions): Promise<void> {
+        const { duplicateStrategy, fromCache, timelineWasEmpty = false } = addLiveEventOptions ?? {};
         if (duplicateStrategy && ["replace", "ignore"].indexOf(duplicateStrategy) === -1) {
             throw new Error("duplicateStrategy MUST be either 'replace' or 'ignore'");
         }
@@ -3250,7 +3169,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                                 content: strippedEvent.content,
                                 event_id: "$fake" + Date.now(),
                                 room_id: this.roomId,
-                                user_id: this.myUserId, // technically a lie
+                                sender: this.myUserId, // technically a lie
                             }),
                         ]);
                     }

@@ -15,7 +15,6 @@ limitations under the License.
 */
 
 import { randomString } from "../randomstring";
-import { subtleCrypto, TextEncoder } from "./crypto";
 
 const DEFAULT_ITERATIONS = 500000;
 
@@ -36,10 +35,6 @@ interface IKey {
 }
 
 export function keyFromAuthData(authData: IAuthData, password: string): Promise<Uint8Array> {
-    if (!global.Olm) {
-        throw new Error("Olm is not available");
-    }
-
     if (!authData.private_key_salt || !authData.private_key_iterations) {
         throw new Error("Salt and/or iterations not found: " + "this backup cannot be restored with a passphrase");
     }
@@ -53,10 +48,6 @@ export function keyFromAuthData(authData: IAuthData, password: string): Promise<
 }
 
 export async function keyFromPassphrase(password: string): Promise<IKey> {
-    if (!global.Olm) {
-        throw new Error("Olm is not available");
-    }
-
     const salt = randomString(32);
 
     const key = await deriveKey(password, salt, DEFAULT_ITERATIONS, DEFAULT_BITSIZE);
@@ -70,15 +61,19 @@ export async function deriveKey(
     iterations: number,
     numBits = DEFAULT_BITSIZE,
 ): Promise<Uint8Array> {
-    if (!subtleCrypto || !TextEncoder) {
+    if (!globalThis.crypto.subtle || !TextEncoder) {
         throw new Error("Password-based backup is not available on this platform");
     }
 
-    const key = await subtleCrypto.importKey("raw", new TextEncoder().encode(password), { name: "PBKDF2" }, false, [
-        "deriveBits",
-    ]);
+    const key = await globalThis.crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(password),
+        { name: "PBKDF2" },
+        false,
+        ["deriveBits"],
+    );
 
-    const keybits = await subtleCrypto.deriveBits(
+    const keybits = await globalThis.crypto.subtle.deriveBits(
         {
             name: "PBKDF2",
             salt: new TextEncoder().encode(salt),

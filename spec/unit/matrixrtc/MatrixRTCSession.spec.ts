@@ -16,7 +16,11 @@ limitations under the License.
 
 import { EventTimeline, EventType, MatrixClient, MatrixError, MatrixEvent, Room } from "../../../src";
 import { KnownMembership } from "../../../src/@types/membership";
-import { CallMembershipData } from "../../../src/matrixrtc/CallMembership";
+import {
+    CallMembershipData,
+    CallMembershipDataLegacy,
+    SessionMembershipData,
+} from "../../../src/matrixrtc/CallMembership";
 import { MatrixRTCSession, MatrixRTCSessionEvent } from "../../../src/matrixrtc/MatrixRTCSession";
 import { EncryptionKeysEventContent } from "../../../src/matrixrtc/types";
 import { randomString } from "../../../src/randomstring";
@@ -29,6 +33,7 @@ const membershipTemplate: CallMembershipData = {
     device_id: "AAAAAAA",
     expires: 60 * 60 * 1000,
     membershipID: "bloop",
+    foci_active: [{ type: "livekit", livekit_service_url: "https://lk.url" }],
 };
 
 const mockFocus = { type: "mock" };
@@ -98,22 +103,33 @@ describe("MatrixRTCSession", () => {
     });
 
     it("safely ignores events with no memberships section", () => {
+        const roomId = randomString(8);
+        const event = {
+            getType: jest.fn().mockReturnValue(EventType.GroupCallMemberPrefix),
+            getContent: jest.fn().mockReturnValue({}),
+            getSender: jest.fn().mockReturnValue("@mock:user.example"),
+            getTs: jest.fn().mockReturnValue(1000),
+            getLocalAge: jest.fn().mockReturnValue(0),
+        };
         const mockRoom = {
             ...makeMockRoom([]),
-            roomId: randomString(8),
+            roomId,
             getLiveTimeline: jest.fn().mockReturnValue({
                 getState: jest.fn().mockReturnValue({
                     on: jest.fn(),
                     off: jest.fn(),
-                    getStateEvents: (_type: string, _stateKey: string) => [
-                        {
-                            getType: jest.fn().mockReturnValue(EventType.GroupCallMemberPrefix),
-                            getContent: jest.fn().mockReturnValue({}),
-                            getSender: jest.fn().mockReturnValue("@mock:user.example"),
-                            getTs: jest.fn().mockReturnValue(1000),
-                            getLocalAge: jest.fn().mockReturnValue(0),
-                        },
-                    ],
+                    getStateEvents: (_type: string, _stateKey: string) => [event],
+                    events: new Map([
+                        [
+                            EventType.GroupCallMemberPrefix,
+                            {
+                                size: () => true,
+                                has: (_stateKey: string) => true,
+                                get: (_stateKey: string) => event,
+                                values: () => [event],
+                            },
+                        ],
+                    ]),
                 }),
             }),
         };
@@ -122,22 +138,33 @@ describe("MatrixRTCSession", () => {
     });
 
     it("safely ignores events with junk memberships section", () => {
+        const roomId = randomString(8);
+        const event = {
+            getType: jest.fn().mockReturnValue(EventType.GroupCallMemberPrefix),
+            getContent: jest.fn().mockReturnValue({ memberships: ["i am a fish"] }),
+            getSender: jest.fn().mockReturnValue("@mock:user.example"),
+            getTs: jest.fn().mockReturnValue(1000),
+            getLocalAge: jest.fn().mockReturnValue(0),
+        };
         const mockRoom = {
             ...makeMockRoom([]),
-            roomId: randomString(8),
+            roomId,
             getLiveTimeline: jest.fn().mockReturnValue({
                 getState: jest.fn().mockReturnValue({
                     on: jest.fn(),
                     off: jest.fn(),
-                    getStateEvents: (_type: string, _stateKey: string) => [
-                        {
-                            getType: jest.fn().mockReturnValue(EventType.GroupCallMemberPrefix),
-                            getContent: jest.fn().mockReturnValue({ memberships: "i am a fish" }),
-                            getSender: jest.fn().mockReturnValue("@mock:user.example"),
-                            getTs: jest.fn().mockReturnValue(1000),
-                            getLocalAge: jest.fn().mockReturnValue(0),
-                        },
-                    ],
+                    getStateEvents: (_type: string, _stateKey: string) => [event],
+                    events: new Map([
+                        [
+                            EventType.GroupCallMemberPrefix,
+                            {
+                                size: () => true,
+                                has: (_stateKey: string) => true,
+                                get: (_stateKey: string) => event,
+                                values: () => [event],
+                            },
+                        ],
+                    ]),
                 }),
             }),
         };
@@ -185,6 +212,67 @@ describe("MatrixRTCSession", () => {
         expect(sess.memberships).toHaveLength(0);
     });
 
+    describe("updateCallMembershipEvent", () => {
+        const mockFocus = { type: "livekit", livekit_service_url: "https://test.org" };
+        const joinSessionConfig = { useLegacyMemberEvents: false };
+
+        const legacyMembershipData: CallMembershipDataLegacy = {
+            call_id: "",
+            scope: "m.room",
+            application: "m.call",
+            device_id: "AAAAAAA_legacy",
+            expires: 60 * 60 * 1000,
+            membershipID: "bloop",
+            foci_active: [mockFocus],
+        };
+
+        const expiredLegacyMembershipData: CallMembershipDataLegacy = {
+            ...legacyMembershipData,
+            device_id: "AAAAAAA_legacy_expired",
+            expires: 0,
+        };
+
+        const sessionMembershipData: SessionMembershipData = {
+            call_id: "",
+            scope: "m.room",
+            application: "m.call",
+            device_id: "AAAAAAA_session",
+            focus_active: mockFocus,
+            foci_preferred: [mockFocus],
+        };
+
+        function testSession(
+            membershipData: CallMembershipData[] | SessionMembershipData,
+            shouldUseLegacy: boolean,
+        ): void {
+            sess = MatrixRTCSession.roomSessionForRoom(client, makeMockRoom(membershipData));
+
+            const makeNewLegacyMembershipsMock = jest.spyOn(sess as any, "makeNewLegacyMemberships");
+            const makeNewMembershipMock = jest.spyOn(sess as any, "makeNewMembership");
+
+            sess.joinRoomSession([mockFocus], mockFocus, joinSessionConfig);
+
+            expect(makeNewLegacyMembershipsMock).toHaveBeenCalledTimes(shouldUseLegacy ? 1 : 0);
+            expect(makeNewMembershipMock).toHaveBeenCalledTimes(shouldUseLegacy ? 0 : 1);
+        }
+
+        it("uses legacy events if there are any active legacy calls", () => {
+            testSession([expiredLegacyMembershipData, legacyMembershipData, sessionMembershipData], true);
+        });
+
+        it('uses legacy events if a non-legacy call is in a "memberships" array', () => {
+            testSession([sessionMembershipData], true);
+        });
+
+        it("uses non-legacy events if all legacy calls are expired", () => {
+            testSession([expiredLegacyMembershipData], false);
+        });
+
+        it("uses non-legacy events if there are only non-legacy calls", () => {
+            testSession(sessionMembershipData, false);
+        });
+    });
+
     describe("getOldestMembership", () => {
         it("returns the oldest membership event", () => {
             const mockRoom = makeMockRoom([
@@ -195,6 +283,64 @@ describe("MatrixRTCSession", () => {
 
             sess = MatrixRTCSession.roomSessionForRoom(client, mockRoom);
             expect(sess.getOldestMembership()!.deviceId).toEqual("old");
+        });
+    });
+
+    describe("getsActiveFocus", () => {
+        const activeFociConfig = { type: "livekit", livekit_service_url: "https://active.url" };
+        it("gets the correct active focus with oldest_membership", () => {
+            const mockRoom = makeMockRoom([
+                Object.assign({}, membershipTemplate, {
+                    device_id: "foo",
+                    created_ts: 500,
+                    foci_active: [activeFociConfig],
+                }),
+                Object.assign({}, membershipTemplate, { device_id: "old", created_ts: 1000 }),
+                Object.assign({}, membershipTemplate, { device_id: "bar", created_ts: 2000 }),
+            ]);
+
+            sess = MatrixRTCSession.roomSessionForRoom(client, mockRoom);
+
+            sess.joinRoomSession([{ type: "livekit", livekit_service_url: "htts://test.org" }], {
+                type: "livekit",
+                focus_selection: "oldest_membership",
+            });
+            expect(sess.getActiveFocus()).toBe(activeFociConfig);
+        });
+        it("does not provide focus if the selction method is unknown", () => {
+            const mockRoom = makeMockRoom([
+                Object.assign({}, membershipTemplate, {
+                    device_id: "foo",
+                    created_ts: 500,
+                    foci_active: [activeFociConfig],
+                }),
+                Object.assign({}, membershipTemplate, { device_id: "old", created_ts: 1000 }),
+                Object.assign({}, membershipTemplate, { device_id: "bar", created_ts: 2000 }),
+            ]);
+
+            sess = MatrixRTCSession.roomSessionForRoom(client, mockRoom);
+
+            sess.joinRoomSession([{ type: "livekit", livekit_service_url: "htts://test.org" }], {
+                type: "livekit",
+                focus_selection: "unknown",
+            });
+            expect(sess.getActiveFocus()).toBe(undefined);
+        });
+        it("gets the correct active focus legacy", () => {
+            const mockRoom = makeMockRoom([
+                Object.assign({}, membershipTemplate, {
+                    device_id: "foo",
+                    created_ts: 500,
+                    foci_active: [activeFociConfig],
+                }),
+                Object.assign({}, membershipTemplate, { device_id: "old", created_ts: 1000 }),
+                Object.assign({}, membershipTemplate, { device_id: "bar", created_ts: 2000 }),
+            ]);
+
+            sess = MatrixRTCSession.roomSessionForRoom(client, mockRoom);
+
+            sess.joinRoomSession([{ type: "livekit", livekit_service_url: "htts://test.org" }]);
+            expect(sess.getActiveFocus()).toBe(activeFociConfig);
         });
     });
 
@@ -223,13 +369,13 @@ describe("MatrixRTCSession", () => {
         });
 
         it("shows joined once join is called", () => {
-            sess!.joinRoomSession([mockFocus]);
+            sess!.joinRoomSession([mockFocus], mockFocus);
             expect(sess!.isJoined()).toEqual(true);
         });
 
         it("sends a membership event when joining a call", () => {
             jest.useFakeTimers();
-            sess!.joinRoomSession([mockFocus]);
+            sess!.joinRoomSession([mockFocus], mockFocus);
             expect(client.sendStateEvent).toHaveBeenCalledWith(
                 mockRoom!.roomId,
                 EventType.GroupCallMemberPrefix,
@@ -242,7 +388,8 @@ describe("MatrixRTCSession", () => {
                             device_id: "AAAAAAA",
                             expires: 3600000,
                             expires_ts: Date.now() + 3600000,
-                            foci_active: [{ type: "mock" }],
+                            foci_active: [mockFocus],
+
                             membershipID: expect.stringMatching(".*"),
                         },
                     ],
@@ -252,12 +399,48 @@ describe("MatrixRTCSession", () => {
             jest.useRealTimers();
         });
 
+        describe("non-legacy calls", () => {
+            const activeFocusConfig = { type: "livekit", livekit_service_url: "https://active.url" };
+            const activeFocus = { type: "livekit", focus_selection: "oldest_membership" };
+
+            function testJoin(useOwnedStateEvents: boolean): void {
+                if (useOwnedStateEvents) {
+                    mockRoom.getVersion = jest.fn().mockReturnValue("org.matrix.msc3779.default");
+                }
+
+                jest.useFakeTimers();
+                sess!.joinRoomSession([activeFocusConfig], activeFocus, { useLegacyMemberEvents: false });
+                expect(client.sendStateEvent).toHaveBeenCalledWith(
+                    mockRoom!.roomId,
+                    EventType.GroupCallMemberPrefix,
+                    {
+                        application: "m.call",
+                        scope: "m.room",
+                        call_id: "",
+                        device_id: "AAAAAAA",
+                        foci_preferred: [activeFocusConfig],
+                        focus_active: activeFocus,
+                    } satisfies SessionMembershipData,
+                    `${!useOwnedStateEvents ? "_" : ""}@alice:example.org_AAAAAAA`,
+                );
+                jest.useRealTimers();
+            }
+
+            it("sends a membership event with session payload when joining a non-legacy call", () => {
+                testJoin(false);
+            });
+
+            it("does not prefix the state key with _ for rooms that support user-owned state events", () => {
+                testJoin(true);
+            });
+        });
+
         it("does nothing if join called when already joined", () => {
-            sess!.joinRoomSession([mockFocus]);
+            sess!.joinRoomSession([mockFocus], mockFocus);
 
             expect(client.sendStateEvent).toHaveBeenCalledTimes(1);
 
-            sess!.joinRoomSession([mockFocus]);
+            sess!.joinRoomSession([mockFocus], mockFocus);
             expect(client.sendStateEvent).toHaveBeenCalledTimes(1);
         });
 
@@ -274,15 +457,26 @@ describe("MatrixRTCSession", () => {
                 const sendStateEventMock = jest.fn().mockImplementation(resolveFn);
                 client.sendStateEvent = sendStateEventMock;
 
-                sess!.joinRoomSession([mockFocus]);
+                sess!.joinRoomSession([mockFocus], mockFocus);
 
                 const eventContent = await eventSentPromise;
 
                 // definitely should have renewed by 1 second before the expiry!
                 const timeElapsed = 60 * 60 * 1000 - 1000;
-                mockRoom.getLiveTimeline().getState(EventTimeline.FORWARDS)!.getStateEvents = jest
-                    .fn()
-                    .mockReturnValue(mockRTCEvent(eventContent.memberships, mockRoom.roomId, timeElapsed));
+                const event = mockRTCEvent(eventContent.memberships, mockRoom.roomId, timeElapsed);
+                const getState = mockRoom.getLiveTimeline().getState(EventTimeline.FORWARDS)!;
+                getState.getStateEvents = jest.fn().mockReturnValue(event);
+                getState.events = new Map([
+                    [
+                        event.getType(),
+                        {
+                            size: () => true,
+                            has: (_stateKey: string) => true,
+                            get: (_stateKey: string) => event,
+                            values: () => [event],
+                        } as unknown as Map<string, MatrixEvent>,
+                    ],
+                ]);
 
                 const eventReSentPromise = new Promise<Record<string, any>>((r) => {
                     resolveFn = (_roomId: string, _type: string, val: Record<string, any>) => {
@@ -308,7 +502,7 @@ describe("MatrixRTCSession", () => {
                                 device_id: "AAAAAAA",
                                 expires: 3600000 * 2,
                                 expires_ts: 1000 + 3600000 * 2,
-                                foci_active: [{ type: "mock" }],
+                                foci_active: [mockFocus],
                                 created_ts: 1000,
                                 membershipID: expect.stringMatching(".*"),
                             },
@@ -322,7 +516,7 @@ describe("MatrixRTCSession", () => {
         });
 
         it("creates a key when joining", () => {
-            sess!.joinRoomSession([mockFocus], true);
+            sess!.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
             const keys = sess?.getKeysForParticipant("@alice:example.org", "AAAAAAA");
             expect(keys).toHaveLength(1);
 
@@ -336,7 +530,7 @@ describe("MatrixRTCSession", () => {
                 sendEventMock.mockImplementation(resolve);
             });
 
-            sess!.joinRoomSession([mockFocus], true);
+            sess!.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
 
             await eventSentPromise;
 
@@ -372,7 +566,7 @@ describe("MatrixRTCSession", () => {
                     });
                 });
 
-                sess!.joinRoomSession([mockFocus], true);
+                sess!.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
                 jest.advanceTimersByTime(10000);
 
                 await eventSentPromise;
@@ -394,7 +588,7 @@ describe("MatrixRTCSession", () => {
                 throw e;
             });
 
-            sess!.joinRoomSession([mockFocus], true);
+            sess!.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
 
             expect(client.cancelPendingEvent).toHaveBeenCalledWith(eventSentinel);
         });
@@ -409,7 +603,7 @@ describe("MatrixRTCSession", () => {
                     sendEventMock.mockImplementation(resolve);
                 });
 
-                sess.joinRoomSession([mockFocus], true);
+                sess.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
                 await keysSentPromise1;
 
                 sendEventMock.mockClear();
@@ -462,7 +656,7 @@ describe("MatrixRTCSession", () => {
                     sendEventMock.mockImplementation((_roomId, _evType, payload) => resolve(payload));
                 });
 
-                sess.joinRoomSession([mockFocus], true);
+                sess.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
                 const firstKeysPayload = await keysSentPromise1;
                 expect(firstKeysPayload.keys).toHaveLength(1);
 
@@ -489,7 +683,7 @@ describe("MatrixRTCSession", () => {
         });
 
         it("Doesn't re-send key immediately", async () => {
-            const realSetImmediate = setImmediate;
+            const realSetTimeout = setTimeout;
             jest.useFakeTimers();
             try {
                 const mockRoom = makeMockRoom([membershipTemplate]);
@@ -499,7 +693,7 @@ describe("MatrixRTCSession", () => {
                     sendEventMock.mockImplementation(resolve);
                 });
 
-                sess.joinRoomSession([mockFocus], true);
+                sess.joinRoomSession([mockFocus], mockFocus, { manageMediaKeys: true });
                 await keysSentPromise1;
 
                 sendEventMock.mockClear();
@@ -517,7 +711,7 @@ describe("MatrixRTCSession", () => {
                 sess.onMembershipUpdate();
 
                 await new Promise((resolve) => {
-                    realSetImmediate(resolve);
+                    realSetTimeout(resolve);
                 });
 
                 expect(sendEventMock).not.toHaveBeenCalled();
@@ -595,7 +789,7 @@ describe("MatrixRTCSession", () => {
 
             jest.advanceTimersByTime(10000);
 
-            sess.joinRoomSession([mockFocus]);
+            sess.joinRoomSession([mockFocus], mockFocus);
 
             expect(client.sendStateEvent).toHaveBeenCalledWith(
                 mockRoomNoExpired!.roomId,
@@ -631,7 +825,7 @@ describe("MatrixRTCSession", () => {
         ]);
         sess = MatrixRTCSession.roomSessionForRoom(client, mockRoom);
 
-        sess.joinRoomSession([mockFocus]);
+        sess.joinRoomSession([mockFocus], mockFocus);
 
         expect(client.sendStateEvent).toHaveBeenCalledWith(
             mockRoom!.roomId,
@@ -645,6 +839,7 @@ describe("MatrixRTCSession", () => {
                         device_id: "OTHERDEVICE",
                         expires: 3600000,
                         created_ts: 1000,
+                        foci_active: [{ type: "livekit", livekit_service_url: "https://lk.url" }],
                         membershipID: expect.stringMatching(".*"),
                     },
                     {
