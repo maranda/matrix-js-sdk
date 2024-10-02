@@ -14,19 +14,19 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IRoomKeyRequestBody, IRoomKeyRequestRecipient } from "../index";
-import { RoomKeyRequestState } from "../OutgoingRoomKeyRequestManager";
-import { IOlmDevice } from "../algorithms/megolm";
-import { TrackingStatus } from "../DeviceList";
-import { IRoomEncryption } from "../RoomList";
-import { IDevice } from "../deviceinfo";
-import { ICrossSigningInfo } from "../CrossSigning";
-import { Logger } from "../../logger";
-import { InboundGroupSessionData } from "../OlmDevice";
-import { MatrixEvent } from "../../models/event";
-import { DehydrationManager } from "../dehydration";
-import { IEncryptedPayload } from "../aes";
-import { CrossSigningKeyInfo } from "../../crypto-api";
+import { IRoomKeyRequestBody, IRoomKeyRequestRecipient } from "../index.ts";
+import { RoomKeyRequestState } from "../OutgoingRoomKeyRequestManager.ts";
+import { IOlmDevice } from "../algorithms/megolm.ts";
+import { TrackingStatus } from "../DeviceList.ts";
+import { IRoomEncryption } from "../RoomList.ts";
+import { IDevice } from "../deviceinfo.ts";
+import { ICrossSigningInfo } from "../CrossSigning.ts";
+import { Logger } from "../../logger.ts";
+import { InboundGroupSessionData } from "../OlmDevice.ts";
+import { MatrixEvent } from "../../models/event.ts";
+import { DehydrationManager } from "../dehydration.ts";
+import { CrossSigningKeyInfo } from "../../crypto-api/index.ts";
+import { AESEncryptedSecretStoragePayload } from "../../@types/AESEncryptedSecretStoragePayload.ts";
 
 /**
  * Internal module. Definitions for storage for the crypto module
@@ -35,11 +35,11 @@ import { CrossSigningKeyInfo } from "../../crypto-api";
 export interface SecretStorePrivateKeys {
     "dehydration": {
         keyInfo: DehydrationManager["keyInfo"];
-        key: IEncryptedPayload;
+        key: AESEncryptedSecretStoragePayload;
         deviceDisplayName: string;
         time: number;
     } | null;
-    "m.megolm_backup.v1": IEncryptedPayload;
+    "m.megolm_backup.v1": AESEncryptedSecretStoragePayload;
 }
 
 /**

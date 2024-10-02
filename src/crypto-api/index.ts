@@ -15,15 +15,15 @@ limitations under the License.
 */
 
 import type { SecretsBundle } from "@matrix-org/matrix-sdk-crypto-wasm";
-import type { IMegolmSessionData } from "../@types/crypto";
-import { Room } from "../models/room";
-import { DeviceMap } from "../models/device";
-import { UIAuthCallback } from "../interactive-auth";
-import { PassphraseInfo, SecretStorageCallbacks, SecretStorageKeyDescription } from "../secret-storage";
-import { VerificationRequest } from "./verification";
-import { BackupTrustInfo, KeyBackupCheck, KeyBackupInfo } from "./keybackup";
-import { ISignatures } from "../@types/signed";
-import { MatrixEvent } from "../models/event";
+import type { IMegolmSessionData } from "../@types/crypto.ts";
+import { Room } from "../models/room.ts";
+import { DeviceMap } from "../models/device.ts";
+import { UIAuthCallback } from "../interactive-auth.ts";
+import { PassphraseInfo, SecretStorageCallbacks, SecretStorageKeyDescription } from "../secret-storage.ts";
+import { VerificationRequest } from "./verification.ts";
+import { BackupTrustInfo, KeyBackupCheck, KeyBackupInfo } from "./keybackup.ts";
+import { ISignatures } from "../@types/signed.ts";
+import { MatrixEvent } from "../models/event.ts";
 
 /**
  * Public interface to the cryptography parts of the js-sdk
@@ -39,6 +39,11 @@ export interface CryptoApi {
      * If true, all unverified devices will be blacklisted by default
      */
     globalBlacklistUnverifiedDevices: boolean;
+
+    /**
+     * The {@link DeviceIsolationMode} mode to use.
+     */
+    setDeviceIsolationMode(isolationMode: DeviceIsolationMode): void;
 
     /**
      * Return the current version of the crypto module.
@@ -189,6 +194,16 @@ export interface CryptoApi {
      *
      */
     getUserVerificationStatus(userId: string): Promise<UserVerificationStatus>;
+
+    /**
+     * "Pin" the current identity of the given user, accepting it as genuine.
+     *
+     * This is useful if the user has changed identity since we first saw them (leading to
+     * {@link UserVerificationStatus.needsUserApproval}), and we are now accepting their new identity.
+     *
+     * Throws an error if called on our own user ID, or on a user ID that we don't have an identity for.
+     */
+    pinCurrentUserIdentity(userId: string): Promise<void>;
 
     /**
      * Get the verification status of a given device.
@@ -557,6 +572,12 @@ export enum DecryptionFailureCode {
     /** Message was encrypted with a Megolm session whose keys have not been shared with us. */
     MEGOLM_UNKNOWN_INBOUND_SESSION_ID = "MEGOLM_UNKNOWN_INBOUND_SESSION_ID",
 
+    /** A special case of {@link MEGOLM_UNKNOWN_INBOUND_SESSION_ID}: the sender has told us it is withholding the key. */
+    MEGOLM_KEY_WITHHELD = "MEGOLM_KEY_WITHHELD",
+
+    /** A special case of {@link MEGOLM_KEY_WITHHELD}: the sender has told us it is withholding the key, because the current device is unverified. */
+    MEGOLM_KEY_WITHHELD_FOR_UNVERIFIED_DEVICE = "MEGOLM_KEY_WITHHELD_FOR_UNVERIFIED_DEVICE",
+
     /** Message was encrypted with a Megolm session which has been shared with us, but in a later ratchet state. */
     OLM_UNKNOWN_MESSAGE_INDEX = "OLM_UNKNOWN_MESSAGE_INDEX",
 
@@ -582,6 +603,23 @@ export enum DecryptionFailureCode {
      * Message was sent when the user was not a member of the room.
      */
     HISTORICAL_MESSAGE_USER_NOT_JOINED = "HISTORICAL_MESSAGE_USER_NOT_JOINED",
+
+    /**
+     * The sender's identity is not verified, but was previously verified.
+     */
+    SENDER_IDENTITY_PREVIOUSLY_VERIFIED = "SENDER_IDENTITY_PREVIOUSLY_VERIFIED",
+
+    /**
+     * The sender device is not cross-signed.  This will only be used if the
+     * device isolation mode is set to `OnlySignedDevicesIsolationMode`.
+     */
+    UNSIGNED_SENDER_DEVICE = "UNSIGNED_SENDER_DEVICE",
+
+    /**
+     * We weren't able to link the message back to any known device.  This will
+     * only be used if the device isolation mode is set to `OnlySignedDevicesIsolationMode`.
+     */
+    UNKNOWN_SENDER_DEVICE = "UNKNOWN_SENDER_DEVICE",
 
     /** Unknown or unclassified error. */
     UNKNOWN_ERROR = "UNKNOWN_ERROR",
@@ -626,6 +664,59 @@ export enum DecryptionFailureCode {
     UNKNOWN_ENCRYPTION_ALGORITHM = "UNKNOWN_ENCRYPTION_ALGORITHM",
 }
 
+/** Base {@link DeviceIsolationMode} kind. */
+export enum DeviceIsolationModeKind {
+    AllDevicesIsolationMode,
+    OnlySignedDevicesIsolationMode,
+}
+
+/**
+ * A type of {@link DeviceIsolationMode}.
+ *
+ * Message encryption keys are shared with all devices in the room, except in case of
+ * verified user problems (see {@link errorOnVerifiedUserProblems}).
+ *
+ * Events from all senders are always decrypted (and should be decorated with message shields in case
+ * of authenticity warnings, see {@link EventEncryptionInfo}).
+ */
+export class AllDevicesIsolationMode {
+    public readonly kind = DeviceIsolationModeKind.AllDevicesIsolationMode;
+
+    /**
+     *
+     * @param errorOnVerifiedUserProblems - Behavior when sharing keys to remote devices.
+     *
+     * If set to `true`, sharing keys will fail (i.e. message sending will fail) with an error if:
+     *   - The user was previously verified but is not anymore, or:
+     *   - A verified user has some unverified devices (not cross-signed).
+     *
+     * If `false`, the keys will be distributed as usual. In this case, the client UX should display
+     * warnings to inform the user about problematic devices/users, and stop them hitting this case.
+     */
+    public constructor(public readonly errorOnVerifiedUserProblems: boolean) {}
+}
+
+/**
+ * A type of {@link DeviceIsolationMode}.
+ *
+ * Message encryption keys are only shared with devices that have been cross-signed by their owner.
+ * Encryption will throw an error if a verified user replaces their identity.
+ *
+ * Events are decrypted only if they come from a cross-signed device. Other events will result in a decryption
+ * failure. (To access the failure reason, see {@link MatrixEvent.decryptionFailureReason}.)
+ */
+export class OnlySignedDevicesIsolationMode {
+    public readonly kind = DeviceIsolationModeKind.OnlySignedDevicesIsolationMode;
+}
+
+/**
+ * DeviceIsolationMode represents the mode of device isolation used when encrypting or decrypting messages.
+ * It can be one of two types: {@link AllDevicesIsolationMode} or {@link OnlySignedDevicesIsolationMode}.
+ *
+ * Only supported by rust Crypto.
+ */
+export type DeviceIsolationMode = AllDevicesIsolationMode | OnlySignedDevicesIsolationMode;
+
 /**
  * Options object for `CryptoApi.bootstrapCrossSigning`.
  */
@@ -644,11 +735,29 @@ export interface BootstrapCrossSigningOpts {
  * Represents the ways in which we trust a user
  */
 export class UserVerificationStatus {
+    /**
+     * Indicates if the identity has changed in a way that needs user approval.
+     *
+     * This happens if the identity has changed since we first saw it, *unless* the new identity has also been verified
+     * by our user (eg via an interactive verification).
+     *
+     * To rectify this, either:
+     *
+     *  * Conduct a verification of the new identity via {@link CryptoApi.requestVerificationDM}.
+     *  * Pin the new identity, via {@link CryptoApi.pinCurrentUserIdentity}.
+     *
+     * @returns true if the identity has changed in a way that needs user approval.
+     */
+    public readonly needsUserApproval: boolean;
+
     public constructor(
         private readonly crossSigningVerified: boolean,
         private readonly crossSigningVerifiedBefore: boolean,
         private readonly tofu: boolean,
-    ) {}
+        needsUserApproval: boolean = false,
+    ) {
+        this.needsUserApproval = needsUserApproval;
+    }
 
     /**
      * @returns true if this user is verified via any means
@@ -674,6 +783,8 @@ export class UserVerificationStatus {
 
     /**
      * @returns true if this user's key is trusted on first use
+     *
+     * @deprecated No longer supported, with the Rust crypto stack.
      */
     public isTofu(): boolean {
         return this.tofu;
@@ -803,6 +914,8 @@ export interface CryptoCallbacks extends SecretStorageCallbacks {
      * @param key - private key to store
      */
     cacheSecretStorageKey?: (keyId: string, keyInfo: SecretStorageKeyDescription, key: Uint8Array) => void;
+
+    /** @deprecated: unused with the Rust crypto stack. */
     onSecretRequested?: (
         userId: string,
         deviceId: string,
@@ -810,10 +923,13 @@ export interface CryptoCallbacks extends SecretStorageCallbacks {
         secretName: string,
         deviceTrust: DeviceVerificationStatus,
     ) => Promise<string | undefined>;
+
+    /** @deprecated: unused with the Rust crypto stack. */
     getDehydrationKey?: (
         keyInfo: SecretStorageKeyDescription,
         checkFunc: (key: Uint8Array) => void,
     ) => Promise<Uint8Array>;
+
     getBackupKey?: () => Promise<Uint8Array>;
 }
 
@@ -848,9 +964,14 @@ export interface CreateSecretStorageOpts {
     setupNewSecretStorage?: boolean;
 
     /**
-     * Function called to get the user's
-     * current key backup passphrase. Should return a promise that resolves with a Uint8Array
+     * Function called to get the user's current key backup passphrase.
+     *
+     * Should return a promise that resolves with a Uint8Array
      * containing the key, or rejects if the key cannot be obtained.
+     *
+     * Only used when the client has existing key backup, but no secret storage.
+     *
+     * @deprecated Not used by the Rust crypto stack.
      */
     getKeyBackupPassphrase?: () => Promise<Uint8Array>;
 }
@@ -949,5 +1070,7 @@ export interface OwnDeviceKeys {
     curve25519: string;
 }
 
-export * from "./verification";
-export * from "./keybackup";
+export * from "./verification.ts";
+export * from "./keybackup.ts";
+export * from "./recovery-key.ts";
+export * from "./key-passphrase.ts";

@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { ISigned } from "../@types/signed";
-import { IEncryptedPayload } from "../crypto/aes";
+import { ISigned } from "../@types/signed.ts";
+import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
 
 export interface Curve25519AuthData {
     public_key: string;
@@ -77,7 +77,7 @@ export interface Curve25519SessionData {
 }
 
 /* eslint-disable camelcase */
-export interface KeyBackupSession<T = Curve25519SessionData | IEncryptedPayload> {
+export interface KeyBackupSession<T = Curve25519SessionData | AESEncryptedSecretStoragePayload> {
     first_message_index: number;
     forwarded_count: number;
     is_verified: boolean;

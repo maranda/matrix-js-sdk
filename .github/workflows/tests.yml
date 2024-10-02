@@ -18,7 +18,7 @@ jobs:
         strategy:
             matrix:
                 specs: [integ, unit]
-                node: ["lts/*", 21, 22]
+                node: ["lts/*", 22]
         steps:
             - name: Checkout code
               uses: actions/checkout@v4
@@ -63,10 +63,20 @@ jobs:
                       coverage
                       !coverage/lcov-report
 
+    # Dummy completion job to simplify branch protections
+    jest-complete:
+        name: Jest tests
+        needs: jest
+        if: always()
+        runs-on: ubuntu-latest
+        steps:
+            - if: needs.jest.result != 'skipped' && needs.jest.result != 'success'
+              run: exit 1
+
     matrix-react-sdk:
         name: Downstream test matrix-react-sdk
         if: github.event_name == 'merge_group'
-        uses: matrix-org/matrix-react-sdk/.github/workflows/tests.yml@develop
+        uses: element-hq/matrix-react-sdk/.github/workflows/tests.yml@develop
         with:
             disable_coverage: true
             matrix-js-sdk-sha: ${{ github.sha }}

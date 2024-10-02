@@ -17,13 +17,13 @@ limitations under the License.
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 import { OlmMachine } from "@matrix-org/matrix-sdk-crypto-wasm";
 
-import { Curve25519AuthData, KeyBackupInfo, KeyBackupSession } from "../crypto-api/keybackup";
-import { Logger } from "../logger";
-import { ClientPrefix, IHttpOpts, MatrixError, MatrixHttpApi, Method } from "../http-api";
-import { RustBackupManager } from "./backup";
-import { CryptoEvent } from "../matrix";
-import { encodeUri, sleep } from "../utils";
-import { BackupDecryptor } from "../common-crypto/CryptoBackend";
+import { Curve25519AuthData, KeyBackupInfo, KeyBackupSession } from "../crypto-api/keybackup.ts";
+import { Logger } from "../logger.ts";
+import { ClientPrefix, IHttpOpts, MatrixError, MatrixHttpApi, Method } from "../http-api/index.ts";
+import { RustBackupManager } from "./backup.ts";
+import { CryptoEvent } from "../matrix.ts";
+import { encodeUri, sleep } from "../utils.ts";
+import { BackupDecryptor } from "../common-crypto/CryptoBackend.ts";
 
 // The minimum time to wait between two retries in case of errors. To avoid hammering the server.
 const KEY_BACKUP_BACKOFF = 5000; // ms
@@ -466,8 +466,6 @@ export class PerSessionKeyBackupDownloader {
             return null;
         }
 
-        const authData = currentServerVersion.auth_data as Curve25519AuthData;
-
         const backupKeys = await this.getBackupDecryptionKey();
         if (!backupKeys?.decryptionKey) {
             this.logger.debug(`Not checking key backup for session (no decryption key)`);
@@ -483,8 +481,9 @@ export class PerSessionKeyBackupDownloader {
             return null;
         }
 
+        const authData = currentServerVersion.auth_data as Curve25519AuthData;
         if (authData.public_key != backupKeys.decryptionKey.megolmV1PublicKey.publicKeyBase64) {
-            this.logger.debug(`getBackupDecryptor key mismatch error`);
+            this.logger.debug(`Key backup on server does not match our decryption key`);
             this.hasConfigurationProblem = true;
             return null;
         }

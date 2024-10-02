@@ -57,6 +57,7 @@ import {
     Room,
     RuleId,
     TweakName,
+    UpdateDelayedEventAction,
 } from "../../src";
 import { supportsMatrixCall } from "../../src/webrtc/call";
 import { makeBeaconEvent } from "../test-utils/beacon";
@@ -97,7 +98,7 @@ type HttpLookup = {
     method: string;
     path: string;
     prefix?: string;
-    data?: Record<string, any>;
+    data?: Record<string, any> | Record<string, any>[];
     error?: object;
     expectBody?: Record<string, any>;
     expectQueryParams?: QueryDict;
@@ -298,7 +299,9 @@ describe("MatrixClient", function () {
             ...(opts || {}),
         });
         // FIXME: We shouldn't be yanking http like this.
-        client.http = (["authedRequest", "getContentUri", "request", "uploadContent"] as const).reduce((r, k) => {
+        client.http = (
+            ["authedRequest", "getContentUri", "request", "uploadContent", "idServerRequest"] as const
+        ).reduce((r, k) => {
             r[k] = jest.fn();
             return r;
         }, {} as MatrixHttpApi<any>);
@@ -704,6 +707,446 @@ describe("MatrixClient", function () {
         });
     });
 
+    describe("_unstable_sendDelayedEvent", () => {
+        const unstableMSC4140Prefix = `${ClientPrefix.Unstable}/org.matrix.msc4140`;
+
+        const roomId = "!room:example.org";
+        const body = "This is the body";
+        const content = { body, msgtype: MsgType.Text } satisfies RoomMessageEventContent;
+        const timeoutDelayOpts = { delay: 2000 };
+        const realTimeoutDelayOpts = { "org.matrix.msc4140.delay": 2000 };
+
+        beforeEach(() => {
+            unstableFeatures["org.matrix.msc4140"] = true;
+        });
+
+        it("throws when unsupported by server", async () => {
+            unstableFeatures["org.matrix.msc4140"] = false;
+            const errorMessage = "Server does not support";
+
+            await expect(
+                client._unstable_sendDelayedEvent(
+                    roomId,
+                    timeoutDelayOpts,
+                    null,
+                    EventType.RoomMessage,
+                    { ...content },
+                    client.makeTxnId(),
+                ),
+            ).rejects.toThrow(errorMessage);
+
+            await expect(
+                client._unstable_sendDelayedStateEvent(roomId, timeoutDelayOpts, EventType.RoomTopic, {
+                    topic: "topic",
+                }),
+            ).rejects.toThrow(errorMessage);
+
+            await expect(client._unstable_getDelayedEvents()).rejects.toThrow(errorMessage);
+
+            await expect(
+                client._unstable_updateDelayedEvent("anyDelayId", UpdateDelayedEventAction.Send),
+            ).rejects.toThrow(errorMessage);
+        });
+
+        it("works with null threadId", async () => {
+            httpLookups = [];
+
+            const timeoutDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${timeoutDelayTxnId}`,
+                expectQueryParams: realTimeoutDelayOpts,
+                data: { delay_id: "id1" },
+                expectBody: content,
+            });
+
+            const { delay_id: timeoutDelayId } = await client._unstable_sendDelayedEvent(
+                roomId,
+                timeoutDelayOpts,
+                null,
+                EventType.RoomMessage,
+                { ...content },
+                timeoutDelayTxnId,
+            );
+
+            const actionDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${actionDelayTxnId}`,
+                expectQueryParams: { "org.matrix.msc4140.parent_delay_id": timeoutDelayId },
+                data: { delay_id: "id2" },
+                expectBody: content,
+            });
+
+            await client._unstable_sendDelayedEvent(
+                roomId,
+                { parent_delay_id: timeoutDelayId },
+                null,
+                EventType.RoomMessage,
+                { ...content },
+                actionDelayTxnId,
+            );
+        });
+
+        it("works with non-null threadId", async () => {
+            httpLookups = [];
+            const threadId = "$threadId:server";
+            const expectBody = {
+                ...content,
+                "m.relates_to": {
+                    event_id: threadId,
+                    is_falling_back: true,
+                    rel_type: "m.thread",
+                },
+            };
+
+            const timeoutDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${timeoutDelayTxnId}`,
+                expectQueryParams: realTimeoutDelayOpts,
+                data: { delay_id: "id1" },
+                expectBody,
+            });
+
+            const { delay_id: timeoutDelayId } = await client._unstable_sendDelayedEvent(
+                roomId,
+                timeoutDelayOpts,
+                threadId,
+                EventType.RoomMessage,
+                { ...content },
+                timeoutDelayTxnId,
+            );
+
+            const actionDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${actionDelayTxnId}`,
+                expectQueryParams: { "org.matrix.msc4140.parent_delay_id": timeoutDelayId },
+                data: { delay_id: "id2" },
+                expectBody,
+            });
+
+            await client._unstable_sendDelayedEvent(
+                roomId,
+                { parent_delay_id: timeoutDelayId },
+                threadId,
+                EventType.RoomMessage,
+                { ...content },
+                actionDelayTxnId,
+            );
+        });
+
+        it("should add thread relation if threadId is passed and the relation is missing", async () => {
+            httpLookups = [];
+            const threadId = "$threadId:server";
+            const expectBody = {
+                ...content,
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        event_id: threadId,
+                    },
+                    "event_id": threadId,
+                    "is_falling_back": true,
+                    "rel_type": "m.thread",
+                },
+            };
+
+            const room = new Room(roomId, client, userId);
+            mocked(store.getRoom).mockReturnValue(room);
+
+            const rootEvent = new MatrixEvent({ event_id: threadId });
+            room.createThread(threadId, rootEvent, [rootEvent], false);
+
+            const timeoutDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${timeoutDelayTxnId}`,
+                expectQueryParams: realTimeoutDelayOpts,
+                data: { delay_id: "id1" },
+                expectBody,
+            });
+
+            const { delay_id: timeoutDelayId } = await client._unstable_sendDelayedEvent(
+                roomId,
+                timeoutDelayOpts,
+                threadId,
+                EventType.RoomMessage,
+                { ...content },
+                timeoutDelayTxnId,
+            );
+
+            const actionDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${actionDelayTxnId}`,
+                expectQueryParams: { "org.matrix.msc4140.parent_delay_id": timeoutDelayId },
+                data: { delay_id: "id2" },
+                expectBody,
+            });
+
+            await client._unstable_sendDelayedEvent(
+                roomId,
+                { parent_delay_id: timeoutDelayId },
+                threadId,
+                EventType.RoomMessage,
+                { ...content },
+                actionDelayTxnId,
+            );
+        });
+
+        it("should add thread relation if threadId is passed and the relation is missing with reply", async () => {
+            httpLookups = [];
+            const threadId = "$threadId:server";
+
+            const content = {
+                body,
+                "msgtype": MsgType.Text,
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        event_id: "$other:event",
+                    },
+                },
+            } satisfies RoomMessageEventContent;
+            const expectBody = {
+                ...content,
+                "m.relates_to": {
+                    "m.in_reply_to": {
+                        event_id: "$other:event",
+                    },
+                    "event_id": threadId,
+                    "is_falling_back": false,
+                    "rel_type": "m.thread",
+                },
+            };
+
+            const room = new Room(roomId, client, userId);
+            mocked(store.getRoom).mockReturnValue(room);
+
+            const rootEvent = new MatrixEvent({ event_id: threadId });
+            room.createThread(threadId, rootEvent, [rootEvent], false);
+
+            const timeoutDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${timeoutDelayTxnId}`,
+                expectQueryParams: realTimeoutDelayOpts,
+                data: { delay_id: "id1" },
+                expectBody,
+            });
+
+            const { delay_id: timeoutDelayId } = await client._unstable_sendDelayedEvent(
+                roomId,
+                timeoutDelayOpts,
+                threadId,
+                EventType.RoomMessage,
+                { ...content },
+                timeoutDelayTxnId,
+            );
+
+            const actionDelayTxnId = client.makeTxnId();
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${actionDelayTxnId}`,
+                expectQueryParams: { "org.matrix.msc4140.parent_delay_id": timeoutDelayId },
+                data: { delay_id: "id2" },
+                expectBody,
+            });
+
+            await client._unstable_sendDelayedEvent(
+                roomId,
+                { parent_delay_id: timeoutDelayId },
+                threadId,
+                EventType.RoomMessage,
+                { ...content },
+                actionDelayTxnId,
+            );
+        });
+
+        it("can send a delayed state event", async () => {
+            httpLookups = [];
+            const content = { topic: "The year 2000" };
+
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/state/m.room.topic/`,
+                expectQueryParams: realTimeoutDelayOpts,
+                data: { delay_id: "id1" },
+                expectBody: content,
+            });
+
+            const { delay_id: timeoutDelayId } = await client._unstable_sendDelayedStateEvent(
+                roomId,
+                timeoutDelayOpts,
+                EventType.RoomTopic,
+                { ...content },
+            );
+
+            httpLookups.push({
+                method: "PUT",
+                path: `/rooms/${encodeURIComponent(roomId)}/state/m.room.topic/`,
+                expectQueryParams: { "org.matrix.msc4140.parent_delay_id": timeoutDelayId },
+                data: { delay_id: "id2" },
+                expectBody: content,
+            });
+
+            await client._unstable_sendDelayedStateEvent(
+                roomId,
+                { parent_delay_id: timeoutDelayId },
+                EventType.RoomTopic,
+                { ...content },
+            );
+        });
+
+        it("can look up delayed events", async () => {
+            httpLookups = [
+                {
+                    method: "GET",
+                    prefix: unstableMSC4140Prefix,
+                    path: "/delayed_events",
+                    data: [],
+                },
+            ];
+
+            await client._unstable_getDelayedEvents();
+        });
+
+        it("can update delayed events", async () => {
+            const delayId = "id";
+            const action = UpdateDelayedEventAction.Restart;
+            httpLookups = [
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}`,
+                    data: {
+                        action,
+                    },
+                },
+            ];
+
+            await client._unstable_updateDelayedEvent(delayId, action);
+        });
+    });
+
+    describe("extended profiles", () => {
+        const unstableMSC4133Prefix = `${ClientPrefix.Unstable}/uk.tcpip.msc4133`;
+        const userId = "@profile_user:example.org";
+
+        beforeEach(() => {
+            unstableFeatures["uk.tcpip.msc4133"] = true;
+        });
+
+        it("throws when unsupported by server", async () => {
+            unstableFeatures["uk.tcpip.msc4133"] = false;
+            const errorMessage = "Server does not support extended profiles";
+
+            await expect(client.doesServerSupportExtendedProfiles()).resolves.toEqual(false);
+
+            await expect(client.getExtendedProfile(userId)).rejects.toThrow(errorMessage);
+            await expect(client.getExtendedProfileProperty(userId, "test_key")).rejects.toThrow(errorMessage);
+            await expect(client.setExtendedProfileProperty("test_key", "foo")).rejects.toThrow(errorMessage);
+            await expect(client.deleteExtendedProfileProperty("test_key")).rejects.toThrow(errorMessage);
+            await expect(client.patchExtendedProfile({ test_key: "foo" })).rejects.toThrow(errorMessage);
+            await expect(client.setExtendedProfile({ test_key: "foo" })).rejects.toThrow(errorMessage);
+        });
+
+        it("can fetch a extended user profile", async () => {
+            const testProfile = {
+                test_key: "foo",
+            };
+            httpLookups = [
+                {
+                    method: "GET",
+                    prefix: unstableMSC4133Prefix,
+                    path: "/profile/" + encodeURIComponent(userId),
+                    data: testProfile,
+                },
+            ];
+            await expect(client.getExtendedProfile(userId)).resolves.toEqual(testProfile);
+            expect(httpLookups).toHaveLength(0);
+        });
+
+        it("can fetch a property from a extended user profile", async () => {
+            const testProfile = {
+                test_key: "foo",
+            };
+            httpLookups = [
+                {
+                    method: "GET",
+                    prefix: unstableMSC4133Prefix,
+                    path: "/profile/" + encodeURIComponent(userId) + "/test_key",
+                    data: testProfile,
+                },
+            ];
+            await expect(client.getExtendedProfileProperty(userId, "test_key")).resolves.toEqual("foo");
+            expect(httpLookups).toHaveLength(0);
+        });
+
+        it("can set a property in our extended profile", async () => {
+            httpLookups = [
+                {
+                    method: "PUT",
+                    prefix: unstableMSC4133Prefix,
+                    path: "/profile/" + encodeURIComponent(client.credentials.userId!) + "/test_key",
+                    expectBody: {
+                        test_key: "foo",
+                    },
+                },
+            ];
+            await expect(client.setExtendedProfileProperty("test_key", "foo")).resolves.toEqual(undefined);
+            expect(httpLookups).toHaveLength(0);
+        });
+
+        it("can delete a property in our extended profile", async () => {
+            httpLookups = [
+                {
+                    method: "DELETE",
+                    prefix: unstableMSC4133Prefix,
+                    path: "/profile/" + encodeURIComponent(client.credentials.userId!) + "/test_key",
+                },
+            ];
+            await expect(client.deleteExtendedProfileProperty("test_key")).resolves.toEqual(undefined);
+            expect(httpLookups).toHaveLength(0);
+        });
+
+        it("can patch our extended profile", async () => {
+            const testProfile = {
+                test_key: "foo",
+            };
+            const patchedProfile = {
+                existing: "key",
+                test_key: "foo",
+            };
+            httpLookups = [
+                {
+                    method: "PATCH",
+                    prefix: unstableMSC4133Prefix,
+                    path: "/profile/" + encodeURIComponent(client.credentials.userId!),
+                    data: patchedProfile,
+                    expectBody: testProfile,
+                },
+            ];
+            await expect(client.patchExtendedProfile(testProfile)).resolves.toEqual(patchedProfile);
+        });
+
+        it("can replace our extended profile", async () => {
+            const testProfile = {
+                test_key: "foo",
+            };
+            httpLookups = [
+                {
+                    method: "PUT",
+                    prefix: unstableMSC4133Prefix,
+                    path: "/profile/" + encodeURIComponent(client.credentials.userId!),
+                    data: testProfile,
+                    expectBody: testProfile,
+                },
+            ];
+            await expect(client.setExtendedProfile(testProfile)).resolves.toEqual(undefined);
+        });
+    });
+
     it("should create (unstable) file trees", async () => {
         const userId = "@test:example.org";
         const roomId = "!room:example.org";
@@ -963,7 +1406,7 @@ describe("MatrixClient", function () {
             const filter = new Filter(client.credentials.userId);
 
             const filterId = await client.getOrCreateFilter(filterName, filter);
-            expect(filterId).toEqual(FILTER_RESPONSE.data?.filter_id);
+            expect(filterId).toEqual(!Array.isArray(FILTER_RESPONSE.data) && FILTER_RESPONSE.data?.filter_id);
         });
     });
 
@@ -3033,6 +3476,47 @@ describe("MatrixClient", function () {
 
             await expect(client.getAuthIssuer()).resolves.toEqual({ issuer: "https://issuer/" });
             expect(httpLookups.length).toEqual(0);
+        });
+    });
+
+    describe("identityHashedLookup", () => {
+        it("should return hashed lookup results", async () => {
+            const ID_ACCESS_TOKEN = "hello_id_server_please_let_me_make_a_request";
+
+            client.http.idServerRequest = jest.fn().mockImplementation((method, path, params) => {
+                if (method === "GET" && path === "/hash_details") {
+                    return { algorithms: ["sha256"], lookup_pepper: "carrot" };
+                } else if (method === "POST" && path === "/lookup") {
+                    return {
+                        mappings: {
+                            "WHA-MgrrsZACDI9F8OaVagpiyiV2sjZylGHJteT4OMU": "@bob:homeserver.dummy",
+                        },
+                    };
+                }
+
+                throw new Error("Test impl doesn't know about this request");
+            });
+
+            const lookupResult = await client.identityHashedLookup([["bob@email.dummy", "email"]], ID_ACCESS_TOKEN);
+
+            expect(client.http.idServerRequest).toHaveBeenCalledWith(
+                "GET",
+                "/hash_details",
+                undefined,
+                "/_matrix/identity/v2",
+                ID_ACCESS_TOKEN,
+            );
+
+            expect(client.http.idServerRequest).toHaveBeenCalledWith(
+                "POST",
+                "/lookup",
+                { pepper: "carrot", algorithm: "sha256", addresses: ["WHA-MgrrsZACDI9F8OaVagpiyiV2sjZylGHJteT4OMU"] },
+                "/_matrix/identity/v2",
+                ID_ACCESS_TOKEN,
+            );
+
+            expect(lookupResult).toHaveLength(1);
+            expect(lookupResult[0]).toEqual({ address: "bob@email.dummy", mxid: "@bob:homeserver.dummy" });
         });
     });
 });

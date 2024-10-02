@@ -14,8 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IHttpOpts, MatrixHttpApi, Method } from "./http-api";
-import { logger } from "./logger";
+import { IHttpOpts, MatrixHttpApi, Method } from "./http-api/index.ts";
+import { logger } from "./logger.ts";
 
 // How often we update the server capabilities.
 // 6 hours - an arbitrary value, but they should change very infrequently.
@@ -37,6 +37,8 @@ export interface IGetLoginTokenCapability extends ICapability {}
 export interface ISetDisplayNameCapability extends ICapability {}
 
 export interface ISetAvatarUrlCapability extends ICapability {}
+
+export interface IProfileFieldsCapability extends ICapability {}
 
 export enum RoomVersionStability {
     Stable = "stable",
@@ -61,6 +63,7 @@ export interface Capabilities {
     "org.matrix.msc3882.get_login_token"?: IGetLoginTokenCapability;
     "m.set_displayname"?: ISetDisplayNameCapability;
     "m.set_avatar_url"?: ISetAvatarUrlCapability;
+    "uk.tcpip.msc4133.profile_fields"?: IProfileFieldsCapability;
 }
 
 type CapabilitiesResponse = {

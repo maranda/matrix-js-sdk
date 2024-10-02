@@ -39,7 +39,7 @@ client.publicRooms(function (err, data) {
 ```
 
 See below for how to include libolm to enable end-to-end-encryption. Please check
-[the Node.js terminal app](examples/node) for a more complex example.
+[the Node.js terminal app](examples/node/README.md) for a more complex example.
 
 To start the client:
 
@@ -191,6 +191,7 @@ As well as the primary entry point (`matrix-js-sdk`), there are several other en
 | `matrix-js-sdk/lib/crypto-api` | Cryptography functionality.                                                                         |
 | `matrix-js-sdk/lib/types`      | Low-level types, reflecting data structures defined in the Matrix spec.                             |
 | `matrix-js-sdk/lib/testing`    | Test utilities, which may be useful in test code but should not be used in production code.         |
+| `matrix-js-sdk/lib/utils/*.js` | A set of modules exporting standalone functions (and their types).                                  |
 
 ## Examples
 

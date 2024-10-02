@@ -16,10 +16,10 @@ limitations under the License.
 
 import { EitherAnd } from "matrix-events-sdk/lib/types";
 
-import { MatrixEvent } from "../matrix";
-import { deepCompare } from "../utils";
-import { Focus } from "./focus";
-import { isLivekitFocusActive } from "./LivekitFocus";
+import { MatrixEvent } from "../matrix.ts";
+import { deepCompare } from "../utils.ts";
+import { Focus } from "./focus.ts";
+import { isLivekitFocusActive } from "./LivekitFocus.ts";
 
 type CallScope = "m.room" | "m.user";
 // Represents an entry in the memberships section of an m.call.member event as it is on the wire
@@ -128,6 +128,10 @@ export class CallMembership {
         return this.parentEvent.getSender();
     }
 
+    public get eventId(): string | undefined {
+        return this.parentEvent.getId();
+    }
+
     public get callId(): string {
         return this.membershipData.call_id;
     }
@@ -156,8 +160,14 @@ export class CallMembership {
         return this.membershipData.created_ts ?? this.parentEvent.getTs();
     }
 
+    /**
+     * Gets the absolute expiry time of the membership if applicable to this membership type.
+     * @returns The absolute expiry time of the membership as a unix timestamp in milliseconds or undefined if not applicable
+     */
     public getAbsoluteExpiry(): number | undefined {
+        // if the membership is not a legacy membership, we assume it is MSC4143
         if (!isLegacyCallMembershipData(this.membershipData)) return undefined;
+
         if ("expires" in this.membershipData) {
             // we know createdTs exists since we already do the isLegacyCallMembershipData check
             return this.createdTs() + this.membershipData.expires;
@@ -167,9 +177,15 @@ export class CallMembership {
         }
     }
 
-    // gets the expiry time of the event, converted into the device's local time
+    /**
+     * Gets the expiry time of the event, converted into the device's local time.
+     * @deprecated This function has been observed returning bad data and is no longer used by MatrixRTC.
+     * @returns The local expiry time of the membership as a unix timestamp in milliseconds or undefined if not applicable
+     */
     public getLocalExpiry(): number | undefined {
+        // if the membership is not a legacy membership, we assume it is MSC4143
         if (!isLegacyCallMembershipData(this.membershipData)) return undefined;
+
         if ("expires" in this.membershipData) {
             // we know createdTs exists since we already do the isLegacyCallMembershipData check
             const relativeCreationTime = this.parentEvent.getTs() - this.createdTs();
@@ -184,10 +200,24 @@ export class CallMembership {
         }
     }
 
+    /**
+     * @returns The number of milliseconds until the membership expires or undefined if applicable
+     */
     public getMsUntilExpiry(): number | undefined {
-        if (isLegacyCallMembershipData(this.membershipData)) return this.getLocalExpiry()! - Date.now();
+        if (isLegacyCallMembershipData(this.membershipData)) {
+            // Assume that local clock is sufficiently in sync with other clocks in the distributed system.
+            // We used to try and adjust for the local clock being skewed, but there are cases where this is not accurate.
+            // The current implementation allows for the local clock to be -infinity to +MatrixRTCSession.MEMBERSHIP_EXPIRY_TIME/2
+            return this.getAbsoluteExpiry()! - Date.now();
+        }
+
+        // Assumed to be MSC4143
+        return undefined;
     }
 
+    /**
+     * @returns true if the membership has expired, otherwise false
+     */
     public isExpired(): boolean {
         if (isLegacyCallMembershipData(this.membershipData)) return this.getMsUntilExpiry()! <= 0;
 

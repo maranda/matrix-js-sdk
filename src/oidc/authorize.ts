@@ -16,9 +16,9 @@ limitations under the License.
 
 import { IdTokenClaims, Log, OidcClient, SigninResponse, SigninState, WebStorageStateStore } from "oidc-client-ts";
 
-import { logger } from "../logger";
-import { randomString } from "../randomstring";
-import { OidcError } from "./error";
+import { logger } from "../logger.ts";
+import { randomString } from "../randomstring.ts";
+import { OidcError } from "./error.ts";
 import {
     BearerTokenResponse,
     UserState,
@@ -26,7 +26,9 @@ import {
     ValidatedIssuerMetadata,
     validateIdToken,
     validateStoredUserState,
-} from "./validate";
+} from "./validate.ts";
+import { sha256 } from "../digest.ts";
+import { encodeUnpaddedBase64Url } from "../base64.ts";
 
 // reexport for backwards compatibility
 export type { BearerTokenResponse };
@@ -61,14 +63,9 @@ const generateCodeChallenge = async (codeVerifier: string): Promise<string> => {
         logger.warn("A secure context is required to generate code challenge. Using plain text code challenge");
         return codeVerifier;
     }
-    const utf8 = new TextEncoder().encode(codeVerifier);
 
-    const digest = await globalThis.crypto.subtle.digest("SHA-256", utf8);
-
-    return btoa(String.fromCharCode(...new Uint8Array(digest)))
-        .replace(/=/g, "")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_");
+    const hashBuffer = await sha256(codeVerifier);
+    return encodeUnpaddedBase64Url(hashBuffer);
 };
 
 /**

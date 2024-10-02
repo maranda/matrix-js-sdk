@@ -16,14 +16,14 @@ limitations under the License.
 
 import { Account, InboundGroupSession, OutboundGroupSession, Session, Utility } from "@matrix-org/olm";
 
-import { logger, Logger } from "../logger";
-import { IndexedDBCryptoStore } from "./store/indexeddb-crypto-store";
-import { CryptoStore, IProblem, ISessionInfo, IWithheld } from "./store/base";
-import { IOlmDevice, IOutboundGroupSessionKey } from "./algorithms/megolm";
-import { IMegolmSessionData, OlmGroupSessionExtraData } from "../@types/crypto";
-import { IMessage } from "./algorithms/olm";
-import { DecryptionFailureCode } from "../crypto-api";
-import { DecryptionError } from "../common-crypto/CryptoBackend";
+import { logger, Logger } from "../logger.ts";
+import { IndexedDBCryptoStore } from "./store/indexeddb-crypto-store.ts";
+import { CryptoStore, IProblem, ISessionInfo, IWithheld } from "./store/base.ts";
+import { IOlmDevice, IOutboundGroupSessionKey } from "./algorithms/megolm.ts";
+import { IMegolmSessionData, OlmGroupSessionExtraData } from "../@types/crypto.ts";
+import { IMessage } from "./algorithms/olm.ts";
+import { DecryptionFailureCode } from "../crypto-api/index.ts";
+import { DecryptionError } from "../common-crypto/CryptoBackend.ts";
 
 // The maximum size of an event is 65K, and we base64 the content, so this is a
 // reasonable approximation to the biggest plaintext we can encrypt.
@@ -1221,13 +1221,13 @@ export class OlmDevice {
                 this.getInboundGroupSession(roomId, senderKey, sessionId, txn, (session, sessionData, withheld) => {
                     if (session === null || sessionData === null) {
                         if (withheld) {
-                            error = new DecryptionError(
-                                DecryptionFailureCode.MEGOLM_UNKNOWN_INBOUND_SESSION_ID,
-                                calculateWithheldMessage(withheld),
-                                {
-                                    session: senderKey + "|" + sessionId,
-                                },
-                            );
+                            const failureCode =
+                                withheld.code === "m.unverified"
+                                    ? DecryptionFailureCode.MEGOLM_KEY_WITHHELD_FOR_UNVERIFIED_DEVICE
+                                    : DecryptionFailureCode.MEGOLM_KEY_WITHHELD;
+                            error = new DecryptionError(failureCode, calculateWithheldMessage(withheld), {
+                                session: senderKey + "|" + sessionId,
+                            });
                         }
                         result = null;
                         return;
@@ -1237,13 +1237,13 @@ export class OlmDevice {
                         res = session.decrypt(body);
                     } catch (e) {
                         if ((<Error>e)?.message === "OLM.UNKNOWN_MESSAGE_INDEX" && withheld) {
-                            error = new DecryptionError(
-                                DecryptionFailureCode.MEGOLM_UNKNOWN_INBOUND_SESSION_ID,
-                                calculateWithheldMessage(withheld),
-                                {
-                                    session: senderKey + "|" + sessionId,
-                                },
-                            );
+                            const failureCode =
+                                withheld.code === "m.unverified"
+                                    ? DecryptionFailureCode.MEGOLM_KEY_WITHHELD_FOR_UNVERIFIED_DEVICE
+                                    : DecryptionFailureCode.MEGOLM_KEY_WITHHELD;
+                            error = new DecryptionError(failureCode, calculateWithheldMessage(withheld), {
+                                session: senderKey + "|" + sessionId,
+                            });
                         } else {
                             error = <Error>e;
                         }

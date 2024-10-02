@@ -18,15 +18,15 @@ limitations under the License.
  * Internal module. Defines the base classes of the encryption implementations
  */
 
-import type { IMegolmSessionData } from "../../@types/crypto";
-import { MatrixClient } from "../../client";
-import { Room } from "../../models/room";
-import { OlmDevice } from "../OlmDevice";
-import { IContent, MatrixEvent, RoomMember } from "../../matrix";
-import { Crypto, IEncryptedContent, IEventDecryptionResult, IncomingRoomKeyRequest } from "..";
-import { DeviceInfo } from "../deviceinfo";
-import { IRoomEncryption } from "../RoomList";
-import { DeviceInfoMap } from "../DeviceList";
+import type { IMegolmSessionData } from "../../@types/crypto.ts";
+import { MatrixClient } from "../../client.ts";
+import { Room } from "../../models/room.ts";
+import { OlmDevice } from "../OlmDevice.ts";
+import { IContent, MatrixEvent, RoomMember } from "../../matrix.ts";
+import { Crypto, IEncryptedContent, IEventDecryptionResult, IncomingRoomKeyRequest } from "../index.ts";
+import { DeviceInfo } from "../deviceinfo.ts";
+import { IRoomEncryption } from "../RoomList.ts";
+import { DeviceInfoMap } from "../DeviceList.ts";
 
 /**
  * Map of registered encryption algorithm classes. A map from string to {@link EncryptionAlgorithm} class
@@ -66,7 +66,6 @@ export abstract class EncryptionAlgorithm {
     protected readonly crypto: Crypto;
     protected readonly olmDevice: OlmDevice;
     protected readonly baseApis: MatrixClient;
-    protected readonly roomId?: string;
 
     /**
      * @param params - parameters
@@ -77,7 +76,6 @@ export abstract class EncryptionAlgorithm {
         this.crypto = params.crypto;
         this.olmDevice = params.olmDevice;
         this.baseApis = params.baseApis;
-        this.roomId = params.roomId;
     }
 
     /**
@@ -127,14 +125,12 @@ export abstract class DecryptionAlgorithm {
     protected readonly crypto: Crypto;
     protected readonly olmDevice: OlmDevice;
     protected readonly baseApis: MatrixClient;
-    protected readonly roomId?: string;
 
     public constructor(params: DecryptionClassParams) {
         this.userId = params.userId;
         this.crypto = params.crypto;
         this.olmDevice = params.olmDevice;
         this.baseApis = params.baseApis;
-        this.roomId = params.roomId;
     }
 
     /**
@@ -237,4 +233,4 @@ export function registerAlgorithm<P extends IParams = IParams>(
 }
 
 /* Re-export for backwards compatibility. Deprecated: this is an internal class. */
-export { DecryptionError } from "../../common-crypto/CryptoBackend";
+export { DecryptionError } from "../../common-crypto/CryptoBackend.ts";

@@ -21,11 +21,12 @@ limitations under the License.
  * Remember to only export *public* types from this file.
  */
 
-export type * from "./@types/media";
-export * from "./@types/membership";
-export type * from "./@types/event";
-export type * from "./@types/events";
-export type * from "./@types/state_events";
+export type * from "./@types/media.ts";
+export * from "./@types/membership.ts";
+export type * from "./@types/event.ts";
+export type * from "./@types/events.ts";
+export type * from "./@types/state_events.ts";
+export type * from "./@types/AESEncryptedSecretStoragePayload.ts";
 
 /** The different methods for device and user verification */
 export enum VerificationMethod {

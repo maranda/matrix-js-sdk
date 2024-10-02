@@ -20,55 +20,58 @@ limitations under the License.
 import anotherjson from "another-json";
 import { v4 as uuidv4 } from "uuid";
 
-import type { IDeviceKeys, IEventDecryptionResult, IMegolmSessionData, IOneTimeKey } from "../@types/crypto";
+import type { IDeviceKeys, IEventDecryptionResult, IMegolmSessionData, IOneTimeKey } from "../@types/crypto.ts";
 import type { PkDecryption, PkSigning } from "@matrix-org/olm";
-import { EventType, ToDeviceMessageId } from "../@types/event";
-import { TypedReEmitter } from "../ReEmitter";
-import { logger } from "../logger";
-import { IExportedDevice, OlmDevice } from "./OlmDevice";
-import { IOlmDevice } from "./algorithms/megolm";
-import * as olmlib from "./olmlib";
-import { DeviceInfoMap, DeviceList } from "./DeviceList";
-import { DeviceInfo, IDevice } from "./deviceinfo";
-import type { DecryptionAlgorithm, EncryptionAlgorithm } from "./algorithms";
-import * as algorithms from "./algorithms";
-import { createCryptoStoreCacheCallbacks, CrossSigningInfo, DeviceTrustLevel, UserTrustLevel } from "./CrossSigning";
-import { EncryptionSetupBuilder } from "./EncryptionSetup";
-import { SecretStorage as LegacySecretStorage } from "./SecretStorage";
-import { CrossSigningKey, ICreateSecretStorageOpts, IEncryptedEventInfo, IRecoveryKey } from "./api";
-import { OutgoingRoomKeyRequestManager } from "./OutgoingRoomKeyRequestManager";
-import { IndexedDBCryptoStore } from "./store/indexeddb-crypto-store";
-import { VerificationBase } from "./verification/Base";
-import { ReciprocateQRCode, SCAN_QR_CODE_METHOD, SHOW_QR_CODE_METHOD } from "./verification/QRCode";
-import { SAS as SASVerification } from "./verification/SAS";
-import { keyFromPassphrase } from "./key_passphrase";
-import { decodeRecoveryKey, encodeRecoveryKey } from "./recoverykey";
-import { VerificationRequest } from "./verification/request/VerificationRequest";
-import { InRoomChannel, InRoomRequests } from "./verification/request/InRoomChannel";
-import { Request, ToDeviceChannel, ToDeviceRequests } from "./verification/request/ToDeviceChannel";
-import { IllegalMethod } from "./verification/IllegalMethod";
-import { KeySignatureUploadError } from "../errors";
-import { calculateKeyCheck, decryptAES, encryptAES, IEncryptedPayload } from "./aes";
-import { DehydrationManager } from "./dehydration";
-import { BackupManager, LibOlmBackupDecryptor, backupTrustInfoFromLegacyTrustInfo } from "./backup";
-import { IStore } from "../store";
-import { Room, RoomEvent } from "../models/room";
-import { RoomMember, RoomMemberEvent } from "../models/room-member";
-import { EventStatus, IContent, IEvent, MatrixEvent, MatrixEventEvent } from "../models/event";
-import { ToDeviceBatch } from "../models/ToDeviceMessage";
-import { ClientEvent, IKeysUploadResponse, ISignedKey, IUploadKeySignaturesResponse, MatrixClient } from "../client";
-import { IRoomEncryption, RoomList } from "./RoomList";
-import { IKeyBackupInfo } from "./keybackup";
-import { ISyncStateData } from "../sync";
-import { CryptoStore } from "./store/base";
-import { IVerificationChannel } from "./verification/request/Channel";
-import { TypedEventEmitter } from "../models/typed-event-emitter";
-import { IDeviceLists, ISyncResponse, IToDeviceEvent } from "../sync-accumulator";
-import { ISignatures } from "../@types/signed";
-import { IMessage } from "./algorithms/olm";
-import { BackupDecryptor, CryptoBackend, DecryptionError, OnSyncCompletedData } from "../common-crypto/CryptoBackend";
-import { RoomState, RoomStateEvent } from "../models/room-state";
-import { MapWithDefault, recursiveMapToObject } from "../utils";
+import { EventType, ToDeviceMessageId } from "../@types/event.ts";
+import { TypedReEmitter } from "../ReEmitter.ts";
+import { logger } from "../logger.ts";
+import { IExportedDevice, OlmDevice } from "./OlmDevice.ts";
+import { IOlmDevice } from "./algorithms/megolm.ts";
+import * as olmlib from "./olmlib.ts";
+import { DeviceInfoMap, DeviceList } from "./DeviceList.ts";
+import { DeviceInfo, IDevice } from "./deviceinfo.ts";
+import type { DecryptionAlgorithm, EncryptionAlgorithm } from "./algorithms/index.ts";
+import * as algorithms from "./algorithms/index.ts";
+import { createCryptoStoreCacheCallbacks, CrossSigningInfo, DeviceTrustLevel, UserTrustLevel } from "./CrossSigning.ts";
+import { EncryptionSetupBuilder } from "./EncryptionSetup.ts";
+import { SecretStorage as LegacySecretStorage } from "./SecretStorage.ts";
+import { CrossSigningKey, ICreateSecretStorageOpts, IEncryptedEventInfo, IRecoveryKey } from "./api.ts";
+import { OutgoingRoomKeyRequestManager } from "./OutgoingRoomKeyRequestManager.ts";
+import { IndexedDBCryptoStore } from "./store/indexeddb-crypto-store.ts";
+import { VerificationBase } from "./verification/Base.ts";
+import { ReciprocateQRCode, SCAN_QR_CODE_METHOD, SHOW_QR_CODE_METHOD } from "./verification/QRCode.ts";
+import { SAS as SASVerification } from "./verification/SAS.ts";
+import { keyFromPassphrase } from "./key_passphrase.ts";
+import { VerificationRequest } from "./verification/request/VerificationRequest.ts";
+import { InRoomChannel, InRoomRequests } from "./verification/request/InRoomChannel.ts";
+import { Request, ToDeviceChannel, ToDeviceRequests } from "./verification/request/ToDeviceChannel.ts";
+import { IllegalMethod } from "./verification/IllegalMethod.ts";
+import { KeySignatureUploadError } from "../errors.ts";
+import { DehydrationManager } from "./dehydration.ts";
+import { BackupManager, LibOlmBackupDecryptor, backupTrustInfoFromLegacyTrustInfo } from "./backup.ts";
+import { IStore } from "../store/index.ts";
+import { Room, RoomEvent } from "../models/room.ts";
+import { RoomMember, RoomMemberEvent } from "../models/room-member.ts";
+import { EventStatus, IContent, IEvent, MatrixEvent, MatrixEventEvent } from "../models/event.ts";
+import { ToDeviceBatch } from "../models/ToDeviceMessage.ts";
+import { ClientEvent, IKeysUploadResponse, ISignedKey, IUploadKeySignaturesResponse, MatrixClient } from "../client.ts";
+import { IRoomEncryption, RoomList } from "./RoomList.ts";
+import { IKeyBackupInfo } from "./keybackup.ts";
+import { ISyncStateData } from "../sync.ts";
+import { CryptoStore } from "./store/base.ts";
+import { IVerificationChannel } from "./verification/request/Channel.ts";
+import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
+import { IDeviceLists, ISyncResponse, IToDeviceEvent } from "../sync-accumulator.ts";
+import { ISignatures } from "../@types/signed.ts";
+import { IMessage } from "./algorithms/olm.ts";
+import {
+    BackupDecryptor,
+    CryptoBackend,
+    DecryptionError,
+    OnSyncCompletedData,
+} from "../common-crypto/CryptoBackend.ts";
+import { RoomState, RoomStateEvent } from "../models/room-state.ts";
+import { MapWithDefault, recursiveMapToObject } from "../utils.ts";
 import {
     AccountDataClient,
     AddSecretStorageKeyOpts,
@@ -77,15 +80,18 @@ import {
     SecretStorageKeyObject,
     SecretStorageKeyTuple,
     ServerSideSecretStorageImpl,
-} from "../secret-storage";
-import { ISecretRequest } from "./SecretSharing";
+} from "../secret-storage.ts";
+import { ISecretRequest } from "./SecretSharing.ts";
 import {
     BackupTrustInfo,
     BootstrapCrossSigningOpts,
     CrossSigningKeyInfo,
     CrossSigningStatus,
+    decodeRecoveryKey,
     DecryptionFailureCode,
+    DeviceIsolationMode,
     DeviceVerificationStatus,
+    encodeRecoveryKey,
     EventEncryptionInfo,
     EventShieldColour,
     EventShieldReason,
@@ -94,18 +100,22 @@ import {
     KeyBackupInfo,
     OwnDeviceKeys,
     VerificationRequest as CryptoApiVerificationRequest,
-} from "../crypto-api";
-import { Device, DeviceMap } from "../models/device";
-import { deviceInfoToDevice } from "./device-converter";
-import { ClientPrefix, MatrixError, Method } from "../http-api";
-import { decodeBase64, encodeBase64 } from "../base64";
-import { KnownMembership } from "../@types/membership";
+} from "../crypto-api/index.ts";
+import { Device, DeviceMap } from "../models/device.ts";
+import { deviceInfoToDevice } from "./device-converter.ts";
+import { ClientPrefix, MatrixError, Method } from "../http-api/index.ts";
+import { decodeBase64, encodeBase64 } from "../base64.ts";
+import { KnownMembership } from "../@types/membership.ts";
+import decryptAESSecretStorageItem from "../utils/decryptAESSecretStorageItem.ts";
+import encryptAESSecretStorageItem from "../utils/encryptAESSecretStorageItem.ts";
+import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
+import { calculateKeyCheck } from "../calculateKeyCheck.ts";
 
 /* re-exports for backwards compatibility */
 export type {
     BootstrapCrossSigningOpts as IBootstrapCrossSigningOpts,
     CryptoCallbacks as ICryptoCallbacks,
-} from "../crypto-api";
+} from "../crypto-api/index.ts";
 
 const DeviceVerification = DeviceInfo.DeviceVerification;
 
@@ -642,6 +652,12 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
         this.backupManager.checkAndStart();
     }
 
+    /**
+     * Implementation of {@link Crypto.CryptoApi#setDeviceIsolationMode}.
+     */
+    public setDeviceIsolationMode(isolationMode: DeviceIsolationMode): void {
+        throw new Error("Not supported");
+    }
     /**
      * Implementation of {@link Crypto.CryptoApi#getVersion}.
      */
@@ -1309,11 +1325,13 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
      * @returns the key, if any, or null
      */
     public async getSessionBackupPrivateKey(): Promise<Uint8Array | null> {
-        const encodedKey = await new Promise<Uint8Array | IEncryptedPayload | string | null>((resolve) => {
-            this.cryptoStore.doTxn("readonly", [IndexedDBCryptoStore.STORE_ACCOUNT], (txn) => {
-                this.cryptoStore.getSecretStorePrivateKey(txn, resolve, "m.megolm_backup.v1");
-            });
-        });
+        const encodedKey = await new Promise<Uint8Array | AESEncryptedSecretStoragePayload | string | null>(
+            (resolve) => {
+                this.cryptoStore.doTxn("readonly", [IndexedDBCryptoStore.STORE_ACCOUNT], (txn) => {
+                    this.cryptoStore.getSecretStorePrivateKey(txn, resolve, "m.megolm_backup.v1");
+                });
+            },
+        );
 
         let key: Uint8Array | null = null;
 
@@ -1324,7 +1342,7 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
         }
         if (encodedKey && typeof encodedKey === "object" && "ciphertext" in encodedKey) {
             const pickleKey = Buffer.from(this.olmDevice.pickleKey);
-            const decrypted = await decryptAES(encodedKey, pickleKey, "m.megolm_backup.v1");
+            const decrypted = await decryptAESSecretStorageItem(encodedKey, pickleKey, "m.megolm_backup.v1");
             key = decodeBase64(decrypted);
         }
         return key;
@@ -1341,7 +1359,7 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
             throw new Error(`storeSessionBackupPrivateKey expects Uint8Array, got ${key}`);
         }
         const pickleKey = Buffer.from(this.olmDevice.pickleKey);
-        const encryptedKey = await encryptAES(encodeBase64(key), pickleKey, "m.megolm_backup.v1");
+        const encryptedKey = await encryptAESSecretStorageItem(encodeBase64(key), pickleKey, "m.megolm_backup.v1");
         return this.cryptoStore.doTxn("readwrite", [IndexedDBCryptoStore.STORE_ACCOUNT], (txn) => {
             this.cryptoStore.storeSecretStorePrivateKey(txn, "m.megolm_backup.v1", encryptedKey);
         });
@@ -1593,6 +1611,13 @@ export class Crypto extends TypedEventEmitter<CryptoEvent, CryptoEventHandlerMap
      */
     public async getUserVerificationStatus(userId: string): Promise<UserTrustLevel> {
         return this.checkUserTrust(userId);
+    }
+
+    /**
+     * Implementation of {@link Crypto.CryptoApi.pinCurrentUserIdentity}.
+     */
+    public async pinCurrentUserIdentity(userId: string): Promise<void> {
+        throw new Error("not implemented");
     }
 
     /**
@@ -4374,4 +4399,4 @@ class IncomingRoomKeyRequestCancellation {
 }
 
 // a number of types are re-exported for backwards compatibility, in case any applications are referencing it.
-export type { IEventDecryptionResult, IMegolmSessionData } from "../@types/crypto";
+export type { IEventDecryptionResult, IMegolmSessionData } from "../@types/crypto.ts";

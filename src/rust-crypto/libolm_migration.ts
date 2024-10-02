@@ -16,18 +16,19 @@ limitations under the License.
 
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 
-import { Logger } from "../logger";
-import { CryptoStore, MigrationState, SecretStorePrivateKeys } from "../crypto/store/base";
-import { IndexedDBCryptoStore } from "../crypto/store/indexeddb-crypto-store";
-import { decryptAES, IEncryptedPayload } from "../crypto/aes";
-import { IHttpOpts, MatrixHttpApi } from "../http-api";
-import { requestKeyBackupVersion } from "./backup";
-import { IRoomEncryption } from "../crypto/RoomList";
-import { CrossSigningKeyInfo, Curve25519AuthData } from "../crypto-api";
-import { RustCrypto } from "./rust-crypto";
-import { KeyBackupInfo } from "../crypto-api/keybackup";
-import { sleep } from "../utils";
-import { encodeBase64 } from "../base64";
+import { Logger } from "../logger.ts";
+import { CryptoStore, MigrationState, SecretStorePrivateKeys } from "../crypto/store/base.ts";
+import { IndexedDBCryptoStore } from "../crypto/store/indexeddb-crypto-store.ts";
+import { IHttpOpts, MatrixHttpApi } from "../http-api/index.ts";
+import { requestKeyBackupVersion } from "./backup.ts";
+import { IRoomEncryption } from "../crypto/RoomList.ts";
+import { CrossSigningKeyInfo, Curve25519AuthData } from "../crypto-api/index.ts";
+import { RustCrypto } from "./rust-crypto.ts";
+import { KeyBackupInfo } from "../crypto-api/keybackup.ts";
+import { sleep } from "../utils.ts";
+import { encodeBase64 } from "../base64.ts";
+import decryptAESSecretStorageItem from "../utils/decryptAESSecretStorageItem.ts";
+import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
 
 /**
  * Determine if any data needs migrating from the legacy store, and do so.
@@ -421,7 +422,7 @@ async function getAndDecryptCachedSecretKey(
     });
 
     if (key && key.ciphertext && key.iv && key.mac) {
-        return await decryptAES(key as IEncryptedPayload, legacyPickleKey, name);
+        return await decryptAESSecretStorageItem(key as AESEncryptedSecretStoragePayload, legacyPickleKey, name);
     } else if (key instanceof Uint8Array) {
         // This is a legacy backward compatibility case where the key was stored in clear.
         return encodeBase64(key);
