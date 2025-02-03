@@ -23,6 +23,7 @@ import {
     EventTimelineSet,
     EventType,
     Filter,
+    KnownMembership,
     MatrixClient,
     MatrixEvent,
     MatrixEventEvent,
@@ -104,7 +105,7 @@ describe("EventTimelineSet", () => {
         it("Adds event to the live timeline in the timeline set", () => {
             const liveTimeline = eventTimelineSet.getLiveTimeline();
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
-            eventTimelineSet.addLiveEvent(messageEvent);
+            eventTimelineSet.addLiveEvent(messageEvent, { addToState: false });
             expect(liveTimeline.getEvents().length).toStrictEqual(1);
         });
 
@@ -113,6 +114,7 @@ describe("EventTimelineSet", () => {
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
             eventTimelineSet.addLiveEvent(messageEvent, {
                 duplicateStrategy: DuplicateStrategy.Replace,
+                addToState: false,
             });
             expect(liveTimeline.getEvents().length).toStrictEqual(1);
 
@@ -130,11 +132,37 @@ describe("EventTimelineSet", () => {
             // replace.
             eventTimelineSet.addLiveEvent(duplicateMessageEvent, {
                 duplicateStrategy: DuplicateStrategy.Replace,
+                addToState: false,
             });
 
             const eventsInLiveTimeline = liveTimeline.getEvents();
             expect(eventsInLiveTimeline.length).toStrictEqual(1);
             expect(eventsInLiveTimeline[0]).toStrictEqual(duplicateMessageEvent);
+        });
+
+        it("should set event.target after applying the membership state update", () => {
+            const eventTimelineSet = room.getUnfilteredTimelineSet();
+
+            const ev1 = utils.mkMembership({
+                room: roomId,
+                mship: KnownMembership.Invite,
+                user: "@sender:server",
+                skey: userA,
+                event: true,
+            });
+            const ev2 = utils.mkMembership({
+                room: roomId,
+                mship: KnownMembership.Join,
+                user: userA,
+                skey: userA,
+                name: "This is my displayname",
+                event: true,
+            });
+
+            eventTimelineSet.addLiveEvent(ev1, { addToState: true });
+            expect(ev1.target?.name).toBe(userA);
+            eventTimelineSet.addLiveEvent(ev2, { addToState: true });
+            expect(ev2.target?.name).toBe("This is my displayname");
         });
     });
 
@@ -144,6 +172,7 @@ describe("EventTimelineSet", () => {
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
             eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline, {
                 toStartOfTimeline: true,
+                addToState: false,
             });
             expect(liveTimeline.getEvents().length).toStrictEqual(1);
         });
@@ -151,10 +180,17 @@ describe("EventTimelineSet", () => {
         it("Make sure legacy overload passing options directly as parameters still works", () => {
             const liveTimeline = eventTimelineSet.getLiveTimeline();
             expect(() => {
-                eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline, true);
+                eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline, {
+                    toStartOfTimeline: true,
+                    addToState: false,
+                });
             }).not.toThrow();
             expect(() => {
-                eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline, true, false);
+                eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline, {
+                    toStartOfTimeline: true,
+                    fromCache: false,
+                    addToState: false,
+                });
             }).not.toThrow();
         });
 
@@ -167,11 +203,13 @@ describe("EventTimelineSet", () => {
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
             eventTimelineSet.addEventToTimeline(reactionEvent, liveTimeline, {
                 toStartOfTimeline: true,
+                addToState: false,
             });
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
 
             eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline, {
                 toStartOfTimeline: true,
+                addToState: false,
             });
             expect(liveTimeline.getEvents()).toHaveLength(1);
             const [event] = liveTimeline.getEvents();
@@ -202,6 +240,7 @@ describe("EventTimelineSet", () => {
             expect(() => {
                 eventTimelineSet.addEventToTimeline(messageEvent, liveTimeline2, {
                     toStartOfTimeline: true,
+                    addToState: false,
                 });
             }).toThrow();
         });
@@ -214,6 +253,7 @@ describe("EventTimelineSet", () => {
 
             eventTimelineSet.addEventToTimeline(threadedReplyEvent, liveTimeline, {
                 toStartOfTimeline: true,
+                addToState: false,
             });
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
         });
@@ -232,6 +272,7 @@ describe("EventTimelineSet", () => {
 
             eventTimelineSetForThread.addEventToTimeline(normalMessage, liveTimeline, {
                 toStartOfTimeline: true,
+                addToState: false,
             });
             expect(liveTimeline.getEvents().length).toStrictEqual(0);
         });
@@ -248,6 +289,7 @@ describe("EventTimelineSet", () => {
                 expect(nonRoomEventTimeline.getEvents().length).toStrictEqual(0);
                 nonRoomEventTimelineSet.addEventToTimeline(messageEvent, nonRoomEventTimeline, {
                     toStartOfTimeline: true,
+                    addToState: false,
                 });
                 expect(nonRoomEventTimeline.getEvents().length).toStrictEqual(1);
             });
@@ -257,7 +299,7 @@ describe("EventTimelineSet", () => {
     describe("aggregateRelations", () => {
         describe("with unencrypted events", () => {
             beforeEach(() => {
-                eventTimelineSet.addEventsToTimeline([messageEvent, replyEvent], true, eventTimeline, "foo");
+                eventTimelineSet.addEventsToTimeline([messageEvent, replyEvent], true, false, eventTimeline, "foo");
             });
 
             itShouldReturnTheRelatedEvents();
@@ -279,7 +321,7 @@ describe("EventTimelineSet", () => {
                 replyEventShouldAttemptDecryptionSpy.mockReturnValue(true);
                 replyEventIsDecryptionFailureSpy = jest.spyOn(messageEvent, "isDecryptionFailure");
 
-                eventTimelineSet.addEventsToTimeline([messageEvent, replyEvent], true, eventTimeline, "foo");
+                eventTimelineSet.addEventsToTimeline([messageEvent, replyEvent], true, false, eventTimeline, "foo");
             });
 
             it("should not return the related events", () => {

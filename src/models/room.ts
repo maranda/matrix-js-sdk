@@ -525,7 +525,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 this.threadsTimelineSets[0] = timelineSets[0];
                 this.threadsTimelineSets[1] = timelineSets[1];
                 return timelineSets;
-            } catch (e) {
+            } catch {
                 this.threadTimelineSetsPromise = null;
                 return null;
             }
@@ -545,7 +545,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * @returns Signals when all events have been decrypted
      */
     public async decryptCriticalEvents(): Promise<void> {
-        if (!this.client.isCryptoEnabled()) return;
+        if (!this.client.getCrypto()) return;
 
         const readReceiptEventId = this.getEventReadUpTo(this.client.getUserId()!, true);
         const events = this.getLiveTimeline().getEvents();
@@ -567,7 +567,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * @returns Signals when all events have been decrypted
      */
     public async decryptAllEvents(): Promise<void> {
-        if (!this.client.isCryptoEnabled()) return;
+        if (!this.client.getCrypto()) return;
 
         const decryptionPromises = this.getUnfilteredTimelineSet()
             .getLiveTimeline()
@@ -619,7 +619,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         let capabilities: Capabilities = {};
         try {
             capabilities = await this.client.getCapabilities();
-        } catch (e) {}
+        } catch {}
         let versionCap = capabilities["m.room_versions"];
         if (!versionCap) {
             versionCap = {
@@ -1661,6 +1661,11 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * "crop" or "scale".
      * @param allowDefault - True to allow an identicon for this room if an
      * avatar URL wasn't explicitly set. Default: true. (Deprecated)
+     * @param useAuthentication - (optional) If true, the caller supports authenticated
+     * media and wants an authentication-required URL. Note that server support for
+     * authenticated media will not be checked - it is the caller's responsibility
+     * to do so before calling this function. Note also that useAuthentication
+     * implies allowRedirects. Defaults to false (unauthenticated endpoints).
      * @returns the avatar URL or null.
      */
     public getAvatarUrl(
@@ -1669,6 +1674,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         height: number,
         resizeMethod: ResizeMethod,
         allowDefault = true,
+        useAuthentication: boolean = false,
     ): string | null {
         const roomAvatarEvent = this.currentState.getStateEvents(EventType.RoomAvatar, "");
         if (!roomAvatarEvent && !allowDefault) {
@@ -1677,7 +1683,16 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
 
         const mainUrl = roomAvatarEvent ? roomAvatarEvent.getContent().url : null;
         if (mainUrl) {
-            return getHttpUriForMxc(baseUrl, mainUrl, width, height, resizeMethod);
+            return getHttpUriForMxc(
+                baseUrl,
+                mainUrl,
+                width,
+                height,
+                resizeMethod,
+                undefined,
+                undefined,
+                useAuthentication,
+            );
         }
 
         return null;
@@ -1739,10 +1754,11 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
     public addEventsToTimeline(
         events: MatrixEvent[],
         toStartOfTimeline: boolean,
+        addToState: boolean,
         timeline: EventTimeline,
         paginationToken?: string,
     ): void {
-        timeline.getTimelineSet().addEventsToTimeline(events, toStartOfTimeline, timeline, paginationToken);
+        timeline.getTimelineSet().addEventsToTimeline(events, toStartOfTimeline, addToState, timeline, paginationToken);
     }
 
     /**
@@ -1907,7 +1923,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
             // see https://github.com/vector-im/vector-web/issues/2109
 
             unfilteredLiveTimeline.getEvents().forEach(function (event) {
-                timelineSet.addLiveEvent(event);
+                timelineSet.addLiveEvent(event, { addToState: false }); // Filtered timeline sets should not track state
             });
 
             // find the earliest unfiltered timeline
@@ -1994,6 +2010,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 if (filterType !== ThreadFilterType.My || currentUserParticipated) {
                     timelineSet.getLiveTimeline().addEvent(thread.rootEvent!, {
                         toStartOfTimeline: false,
+                        addToState: false,
                     });
                 }
             });
@@ -2068,6 +2085,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 const opts = {
                     duplicateStrategy: DuplicateStrategy.Ignore,
                     fromCache: false,
+                    addToState: false,
                     roomState,
                 };
                 this.threadsTimelineSets[0]?.addLiveEvent(rootEvent, opts);
@@ -2190,6 +2208,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 duplicateStrategy: DuplicateStrategy.Replace,
                 fromCache: false,
                 roomState,
+                addToState: false,
             });
         }
     }
@@ -2381,9 +2400,13 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                     duplicateStrategy: DuplicateStrategy.Replace,
                     fromCache: false,
                     roomState: this.currentState,
+                    addToState: false,
                 });
             } else {
-                timelineSet.addEventToTimeline(thread.rootEvent, timelineSet.getLiveTimeline(), { toStartOfTimeline });
+                timelineSet.addEventToTimeline(thread.rootEvent, timelineSet.getLiveTimeline(), {
+                    toStartOfTimeline,
+                    addToState: false,
+                });
             }
         }
     };
@@ -2540,7 +2563,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
      * Fires {@link RoomEvent.Timeline}
      */
     private addLiveEvent(event: MatrixEvent, addLiveEventOptions: IAddLiveEventOptions): void {
-        const { duplicateStrategy, timelineWasEmpty, fromCache } = addLiveEventOptions;
+        const { duplicateStrategy, timelineWasEmpty, fromCache, addToState } = addLiveEventOptions;
 
         // add to our timeline sets
         for (const timelineSet of this.timelineSets) {
@@ -2548,6 +2571,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 duplicateStrategy,
                 fromCache,
                 timelineWasEmpty,
+                addToState,
             });
         }
 
@@ -2631,11 +2655,13 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                     if (timelineSet.getFilter()!.filterRoomTimeline([event]).length) {
                         timelineSet.addEventToTimeline(event, timelineSet.getLiveTimeline(), {
                             toStartOfTimeline: false,
+                            addToState: false, // We don't support localEcho of state events yet
                         });
                     }
                 } else {
                     timelineSet.addEventToTimeline(event, timelineSet.getLiveTimeline(), {
                         toStartOfTimeline: false,
+                        addToState: false, // We don't support localEcho of state events yet
                     });
                 }
             }
@@ -2858,22 +2884,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
         }
     }
 
-    /**
-     * Add some events to this room. This can include state events, message
-     * events and typing notifications. These events are treated as "live" so
-     * they will go to the end of the timeline.
-     *
-     * @param events - A list of events to add.
-     * @param addLiveEventOptions - addLiveEvent options
-     * @throws If `duplicateStrategy` is not falsey, 'replace' or 'ignore'.
-     */
-    public async addLiveEvents(events: MatrixEvent[], addLiveEventOptions?: IAddLiveEventOptions): Promise<void> {
-        const { duplicateStrategy, fromCache, timelineWasEmpty = false } = addLiveEventOptions ?? {};
-        if (duplicateStrategy && ["replace", "ignore"].indexOf(duplicateStrategy) === -1) {
-            throw new Error("duplicateStrategy MUST be either 'replace' or 'ignore'");
-        }
-
-        // sanity check that the live timeline is still live
+    private assertTimelineSetsAreLive(): void {
         for (let i = 0; i < this.timelineSets.length; i++) {
             const liveTimeline = this.timelineSets[i].getLiveTimeline();
             if (liveTimeline.getPaginationToken(EventTimeline.FORWARDS)) {
@@ -2890,6 +2901,25 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 throw new Error(`live timeline ${i} is no longer live - it has a neighbouring timeline`);
             }
         }
+    }
+
+    /**
+     * Add some events to this room. This can include state events, message
+     * events and typing notifications. These events are treated as "live" so
+     * they will go to the end of the timeline.
+     *
+     * @param events - A list of events to add.
+     * @param addLiveEventOptions - addLiveEvent options
+     * @throws If `duplicateStrategy` is not falsey, 'replace' or 'ignore'.
+     */
+    public async addLiveEvents(events: MatrixEvent[], addLiveEventOptions: IAddLiveEventOptions): Promise<void> {
+        const { duplicateStrategy, fromCache, timelineWasEmpty = false, addToState } = addLiveEventOptions;
+        if (duplicateStrategy && ["replace", "ignore"].indexOf(duplicateStrategy) === -1) {
+            throw new Error("duplicateStrategy MUST be either 'replace' or 'ignore'");
+        }
+
+        // sanity check that the live timeline is still live
+        this.assertTimelineSetsAreLive();
 
         const threadRoots = this.findThreadRoots(events);
         const eventsByThread: { [threadId: string]: MatrixEvent[] } = {};
@@ -2898,6 +2928,7 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
             duplicateStrategy,
             fromCache,
             timelineWasEmpty,
+            addToState,
         };
 
         // List of extra events to check for being parents of any relations encountered
@@ -2916,11 +2947,11 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                 }
             }
 
-            let { shouldLiveInRoom, shouldLiveInThread, threadId } = this.eventShouldLiveIn(
-                event,
-                neighbouringEvents,
-                threadRoots,
-            );
+            let {
+                shouldLiveInRoom,
+                shouldLiveInThread,
+                threadId = "",
+            } = this.eventShouldLiveIn(event, neighbouringEvents, threadRoots);
 
             if (!shouldLiveInThread && !shouldLiveInRoom && event.isRelation()) {
                 try {
@@ -2935,20 +2966,20 @@ export class Room extends ReadReceipt<RoomEmittedEvents, RoomEventHandlerMap> {
                         event.setUnsigned(unsigned);
                     }
 
-                    ({ shouldLiveInRoom, shouldLiveInThread, threadId } = this.eventShouldLiveIn(
-                        event,
-                        neighbouringEvents,
-                        threadRoots,
-                    ));
+                    ({
+                        shouldLiveInRoom,
+                        shouldLiveInThread,
+                        threadId = "",
+                    } = this.eventShouldLiveIn(event, neighbouringEvents, threadRoots));
                 } catch (e) {
                     logger.error("Failed to load parent event of unhandled relation", e);
                 }
             }
 
-            if (shouldLiveInThread && !eventsByThread[threadId ?? ""]) {
-                eventsByThread[threadId ?? ""] = [];
+            if (shouldLiveInThread && !eventsByThread[threadId]) {
+                eventsByThread[threadId] = [];
             }
-            eventsByThread[threadId ?? ""]?.push(event);
+            eventsByThread[threadId]?.push(event);
 
             if (shouldLiveInRoom) {
                 this.addLiveEvent(event, options);

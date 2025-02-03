@@ -49,6 +49,7 @@ export * from "./scheduler.ts";
 export * from "./filter.ts";
 export * from "./timeline-window.ts";
 export * from "./interactive-auth.ts";
+export * from "./version-support.ts";
 export * from "./service-types.ts";
 export * from "./store/memory.ts";
 export * from "./store/indexeddb.ts";
@@ -57,8 +58,8 @@ export * from "./crypto/store/localStorage-crypto-store.ts";
 export * from "./crypto/store/indexeddb-crypto-store.ts";
 export type { OutgoingRoomKeyRequest } from "./crypto/store/base.ts";
 export * from "./content-repo.ts";
-export * from "./@types/common.ts";
-export * from "./@types/uia.ts";
+export type * from "./@types/common.ts";
+export type * from "./@types/uia.ts";
 export * from "./@types/event.ts";
 export * from "./@types/PushRules.ts";
 export * from "./@types/partials.ts";
@@ -70,15 +71,17 @@ export * from "./@types/location.ts";
 export * from "./@types/threepids.ts";
 export * from "./@types/auth.ts";
 export * from "./@types/polls.ts";
-export * from "./@types/local_notifications.ts";
-export * from "./@types/registration.ts";
+export type * from "./@types/local_notifications.ts";
+export type * from "./@types/registration.ts";
 export * from "./@types/read_receipts.ts";
-export * from "./@types/crypto.ts";
+export type * from "./@types/crypto.ts";
 export * from "./@types/extensible_events.ts";
-export * from "./@types/IIdentityServerProvider.ts";
+export type * from "./@types/IIdentityServerProvider.ts";
 export * from "./@types/membership.ts";
 export * from "./models/room-summary.ts";
 export * from "./models/event-status.ts";
+export * from "./models/profile-keys.ts";
+export * from "./models/related-relations.ts";
 export type { RoomSummary } from "./client.ts";
 export * as ContentHelpers from "./content-helpers.ts";
 export * as SecretStorage from "./secret-storage.ts";
@@ -93,7 +96,11 @@ export {
     GroupCallType,
     GroupCallStatsReportEvent,
 } from "./webrtc/groupCall.ts";
-export { CryptoEvent } from "./crypto/index.ts";
+
+export {
+    /** @deprecated Use {@link Crypto.CryptoEvent} instead */
+    CryptoEvent,
+} from "./crypto/index.ts";
 export { SyncState, SetPresence } from "./sync.ts";
 export type { ISyncStateData as SyncStateData } from "./sync.ts";
 export { SlidingSyncEvent } from "./sliding-sync.ts";
@@ -102,18 +109,13 @@ export { CallFeedEvent } from "./webrtc/callFeed.ts";
 export { StatsReport } from "./webrtc/stats/statsReport.ts";
 export { Relations, RelationsEvent } from "./models/relations.ts";
 export { TypedEventEmitter } from "./models/typed-event-emitter.ts";
-export { LocalStorageErrors } from "./store/local-storage-events-emitter.ts";
+export { LocalStorageErrors, localStorageErrorsEventsEmitter } from "./store/local-storage-events-emitter.ts";
 export { IdentityProviderBrand, SSOAction } from "./@types/auth.ts";
 export type { ISSOFlow as SSOFlow, LoginFlow } from "./@types/auth.ts";
 export type { IHierarchyRelation as HierarchyRelation, IHierarchyRoom as HierarchyRoom } from "./@types/spaces.ts";
 export { LocationAssetType } from "./@types/location.ts";
 
-/**
- * Types supporting cryptography.
- *
- * The most important is {@link Crypto.CryptoApi}, an instance of which can be retrieved via
- * {@link MatrixClient.getCrypto}.
- */
+/** @deprecated Backwards-compatibility re-export. Import from `crypto-api` directly. */
 export * as Crypto from "./crypto-api/index.ts";
 
 let cryptoStoreFactory = (): CryptoStore => new MemoryCryptoStore();
@@ -131,7 +133,7 @@ function amendClientOpts(opts: ICreateClientOpts): ICreateClientOpts {
     opts.store =
         opts.store ??
         new MemoryStore({
-            localStorage: global.localStorage,
+            localStorage: globalThis.localStorage,
         });
     opts.scheduler = opts.scheduler ?? new MatrixScheduler();
     opts.cryptoStore = opts.cryptoStore ?? cryptoStoreFactory();

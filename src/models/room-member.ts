@@ -368,6 +368,11 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
      * If false, any non-matrix content URLs will be ignored. Setting this option to
      * true will expose URLs that, if fetched, will leak information about the user
      * to anyone who they share a room with.
+     * @param useAuthentication - (optional) If true, the caller supports authenticated
+     * media and wants an authentication-required URL. Note that server support for
+     * authenticated media will not be checked - it is the caller's responsibility
+     * to do so before calling this function. Note also that useAuthentication
+     * implies allowRedirects. Defaults to false (unauthenticated endpoints).
      * @returns the avatar URL or null.
      */
     public getAvatarUrl(
@@ -377,13 +382,23 @@ export class RoomMember extends TypedEventEmitter<RoomMemberEvent, RoomMemberEve
         resizeMethod: string,
         allowDefault = true,
         allowDirectLinks: boolean,
+        useAuthentication: boolean = false,
     ): string | null {
         const rawUrl = this.getMxcAvatarUrl();
 
         if (!rawUrl && !allowDefault) {
             return null;
         }
-        const httpUrl = getHttpUriForMxc(baseUrl, rawUrl, width, height, resizeMethod, allowDirectLinks);
+        const httpUrl = getHttpUriForMxc(
+            baseUrl,
+            rawUrl,
+            width,
+            height,
+            resizeMethod,
+            allowDirectLinks,
+            undefined,
+            useAuthentication,
+        );
         if (httpUrl) {
             return httpUrl;
         }
@@ -408,17 +423,18 @@ const LTR_RTL_PATTERN = /[\u200E\u200F\u202A-\u202F]/;
 
 function shouldDisambiguate(selfUserId: string, displayName?: string, roomState?: RoomState): boolean {
     if (!displayName || displayName === selfUserId) return false;
+    if (!roomState) return false;
+
+    const strippedDisplayName = removeHiddenChars(displayName);
 
     // First check if the displayname is something we consider truthy
     // after stripping it of zero width characters and padding spaces
-    if (!removeHiddenChars(displayName)) return false;
-
-    if (!roomState) return false;
+    if (!strippedDisplayName) return false;
 
     // Next check if the name contains something that look like a mxid
     // If it does, it may be someone trying to impersonate someone else
     // Show full mxid in this case
-    if (MXID_PATTERN.test(displayName)) return true;
+    if (MXID_PATTERN.test(strippedDisplayName)) return true;
 
     // Also show mxid if the display name contains any LTR/RTL characters as these
     // make it very difficult for us to find similar *looking* display names
