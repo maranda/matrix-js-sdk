@@ -17,20 +17,20 @@ limitations under the License.
 import type { SecretsBundle } from "@matrix-org/matrix-sdk-crypto-wasm";
 import type { IMegolmSessionData } from "../@types/crypto.ts";
 import type { ToDeviceBatch, ToDevicePayload } from "../models/ToDeviceMessage.ts";
-import { Room } from "../models/room.ts";
-import { DeviceMap } from "../models/device.ts";
-import { UIAuthCallback } from "../interactive-auth.ts";
-import { PassphraseInfo, SecretStorageKeyDescription } from "../secret-storage.ts";
-import { VerificationRequest } from "./verification.ts";
+import { type Room } from "../models/room.ts";
+import { type DeviceMap } from "../models/device.ts";
+import { type UIAuthCallback } from "../interactive-auth.ts";
+import { type PassphraseInfo, type SecretStorageKeyDescription } from "../secret-storage.ts";
+import { type VerificationRequest } from "./verification.ts";
 import {
-    BackupTrustInfo,
-    KeyBackupCheck,
-    KeyBackupInfo,
-    KeyBackupRestoreOpts,
-    KeyBackupRestoreResult,
+    type BackupTrustInfo,
+    type KeyBackupCheck,
+    type KeyBackupInfo,
+    type KeyBackupRestoreOpts,
+    type KeyBackupRestoreResult,
 } from "./keybackup.ts";
-import { ISignatures } from "../@types/signed.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type ISignatures } from "../@types/signed.ts";
+import { type MatrixEvent } from "../models/event.ts";
 
 /**
  * `matrix-js-sdk/lib/crypto-api`: End-to-end encryption support.
@@ -283,8 +283,6 @@ export interface CryptoApi {
      * @param verified - whether to mark the device as verified. Defaults to 'true'.
      *
      * @throws an error if the device is unknown, or has not published any encryption keys.
-     *
-     * @remarks Fires {@link matrix.CryptoEvent.DeviceVerificationChanged}
      */
     setDeviceVerified(userId: string, deviceId: string, verified?: boolean): Promise<void>;
 
@@ -438,10 +436,16 @@ export interface CryptoApi {
 
     /**
      * Reset the encryption of the user by going through the following steps:
+     * - Remove the dehydrated device and stop the periodic creation of dehydrated devices.
      * - Disable backing up room keys and delete any existing backups.
      * - Remove the default secret storage key from the account data (ie: the recovery key).
      * - Reset the cross-signing keys.
      * - Create a new key backup.
+     *
+     * Note that the dehydrated device will be removed, but will not be replaced
+     * and it will not schedule creating new dehydrated devices.  To do this,
+     * {@link startDehydration} should be called after a new secret storage key
+     * is created.
      *
      * @param authUploadDeviceSigningKeys - Callback to authenticate the upload of device signing keys.
      *      Used when resetting the cross signing keys.
@@ -586,7 +590,7 @@ export interface CryptoApi {
     /**
      * Determine if a key backup can be trusted.
      *
-     * @param info - key backup info dict from {@link matrix.MatrixClient.getKeyBackupVersion}.
+     * @param info - key backup info dict from {@link CryptoApi.getKeyBackupInfo}.
      */
     isKeyBackupTrusted(info: KeyBackupInfo): Promise<BackupTrustInfo>;
 
@@ -624,6 +628,16 @@ export interface CryptoApi {
      * The backup engine will be started using the new backup version (i.e., {@link checkKeyBackupAndEnable} is called).
      */
     resetKeyBackup(): Promise<void>;
+
+    /**
+     * Disables server-side key storage and deletes server-side backups.
+     *  * Deletes the current key backup version, if any (but not any previous versions).
+     *  * Disables 4S, deleting the info for the default key, the default key pointer itself and any
+     *    known 4S data (cross-signing keys and the megolm key backup key).
+     *  * Deletes any dehydrated devices.
+     *  * Sets the "m.org.matrix.custom.backup_disabled" account data flag to indicate that the user has disabled backups.
+     */
+    disableKeyStorage(): Promise<void>;
 
     /**
      * Deletes the given key backup.
@@ -991,7 +1005,7 @@ export class DeviceVerificationStatus {
      * Check if we should consider this device "verified".
      *
      * A device is "verified" if either:
-     *  * it has been manually marked as such via {@link matrix.MatrixClient.setDeviceVerified}.
+     *  * it has been manually marked as such via {@link CryptoApi.setDeviceVerified}.
      *  * it has been cross-signed with a verified signing key, **and** the client has been configured to trust
      *    cross-signed devices via {@link CryptoApi.setTrustCrossSignedDevices}.
      *
@@ -1003,17 +1017,71 @@ export class DeviceVerificationStatus {
 }
 
 /**
+ * Enum representing the different stages of importing room keys.
+ *
+ * This is the type of the `stage` property of {@link ImportRoomKeyProgressData}.
+ */
+export enum ImportRoomKeyStage {
+    /**
+     * The stage where room keys are being fetched.
+     *
+     * @see {@link ImportRoomKeyFetchProgress}.
+     */
+    Fetch = "fetch",
+    /**
+     * The stage where room keys are being loaded.
+     *
+     * @see {@link ImportRoomKeyLoadProgress}.
+     */
+    LoadKeys = "load_keys",
+}
+
+/**
+ * Type representing the progress during the 'fetch' stage of the room key import process.
+ *
+ * @see {@link ImportRoomKeyProgressData}.
+ */
+export type ImportRoomKeyFetchProgress = {
+    /**
+     * The current stage of the import process.
+     */
+    stage: ImportRoomKeyStage.Fetch;
+};
+
+/**
+ * Type representing the progress during the 'load_keys' stage of the room key import process.
+ *
+ * @see {@link ImportRoomKeyProgressData}.
+ */
+export type ImportRoomKeyLoadProgress = {
+    /**
+     * The current stage of the import process.
+     */
+    stage: ImportRoomKeyStage.LoadKeys;
+
+    /**
+     * The number of successfully loaded room keys so far.
+     */
+    successes: number;
+
+    /**
+     * The number of room keys that failed to load so far.
+     */
+    failures: number;
+
+    /**
+     * The total number of room keys being loaded.
+     */
+    total: number;
+};
+
+/**
  * Room key import progress report.
  * Used when calling {@link CryptoApi#importRoomKeys},
  * {@link CryptoApi#importRoomKeysAsJson} or {@link CryptoApi#restoreKeyBackup} as the parameter of
  * the progressCallback. Used to display feedback.
  */
-export interface ImportRoomKeyProgressData {
-    stage: string; // TODO: Enum
-    successes?: number;
-    failures?: number;
-    total?: number;
-}
+export type ImportRoomKeyProgressData = ImportRoomKeyFetchProgress | ImportRoomKeyLoadProgress;
 
 /**
  * Options object for {@link CryptoApi#importRoomKeys} and

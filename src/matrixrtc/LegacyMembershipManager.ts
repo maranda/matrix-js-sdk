@@ -1,53 +1,33 @@
+/*
+Copyright 2025 The Matrix.org Foundation C.I.C.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 import { EventType } from "../@types/event.ts";
 import { UpdateDelayedEventAction } from "../@types/requests.ts";
 import type { MatrixClient } from "../client.ts";
 import { HTTPError, MatrixError } from "../http-api/errors.ts";
 import { logger } from "../logger.ts";
 import { EventTimeline } from "../models/event-timeline.ts";
-import { Room } from "../models/room.ts";
+import { type Room } from "../models/room.ts";
 import { sleep } from "../utils.ts";
-import { CallMembership, DEFAULT_EXPIRE_DURATION, SessionMembershipData } from "./CallMembership.ts";
-import { Focus } from "./focus.ts";
+import { type CallMembership, DEFAULT_EXPIRE_DURATION, type SessionMembershipData } from "./CallMembership.ts";
+import { type Focus } from "./focus.ts";
 import { isLivekitFocusActive } from "./LivekitFocus.ts";
-import { MembershipConfig } from "./MatrixRTCSession.ts";
-/**
- * This interface defines what a MembershipManager uses and exposes.
- * This interface is what we use to write tests and allows to change the actual implementation
- * Without breaking tests because of some internal method renaming.
- *
- * @internal
- */
-export interface IMembershipManager {
-    /**
-     * If we are trying to join the session.
-     * It does not reflect if the room state is already configures to represent us being joined.
-     * It only means that the Manager is running.
-     * @returns true if we intend to be participating in the MatrixRTC session
-     */
-    isJoined(): boolean;
-    /**
-     * Start sending all necessary events to make this user participant in the RTC session.
-     * @param fociPreferred the list of preferred foci to use in the joined RTC membership event.
-     * @param fociActive the active focus to use in the joined RTC membership event.
-     */
-    join(fociPreferred: Focus[], fociActive?: Focus): void;
-    /**
-     * Send all necessary events to make this user leave the RTC session.
-     * @param timeout the maximum duration in ms until the promise is forced to resolve.
-     * @returns It resolves with true in case the leave was sent successfully.
-     * It resolves with false in case we hit the timeout before sending successfully.
-     */
-    leave(timeout: number | undefined): Promise<boolean>;
-    /**
-     * Call this if the MatrixRTC session members have changed.
-     */
-    onRTCSessionMemberUpdate(memberships: CallMembership[]): Promise<void>;
-    /**
-     * The used active focus in the currently joined session.
-     * @returns the used active focus in the currently joined session or undefined if not joined.
-     */
-    getActiveFocus(): Focus | undefined;
-}
+import { type MembershipConfig } from "./MatrixRTCSession.ts";
+import { type EmptyObject } from "../@types/common.ts";
+import { type IMembershipManager, type MembershipManagerEvent, Status } from "./types.ts";
 
 /**
  * This internal class is used by the MatrixRTCSession to manage the local user's own membership of the session.
@@ -63,7 +43,8 @@ export interface IMembershipManager {
  *
  * It is recommended to only use this interface for testing to allow replacing this class.
  *
- *  @internal
+ * @internal
+ * @deprecated Use {@link MembershipManager} instead
  */
 export class LegacyMembershipManager implements IMembershipManager {
     private relativeExpiry: number | undefined;
@@ -116,15 +97,40 @@ export class LegacyMembershipManager implements IMembershipManager {
             | "getUserId"
             | "getDeviceId"
             | "sendStateEvent"
-            | "_unstable_sendDelayedEvent"
             | "_unstable_sendDelayedStateEvent"
             | "_unstable_updateDelayedEvent"
         >,
         private getOldestMembership: () => CallMembership | undefined,
     ) {}
 
+    public off(
+        event: MembershipManagerEvent.StatusChanged,
+        listener: (oldStatus: Status, newStatus: Status) => void,
+    ): this {
+        logger.error("off is not implemented on LegacyMembershipManager");
+        return this;
+    }
+
+    public on(
+        event: MembershipManagerEvent.StatusChanged,
+        listener: (oldStatus: Status, newStatus: Status) => void,
+    ): this {
+        logger.error("on is not implemented on LegacyMembershipManager");
+        return this;
+    }
+
     public isJoined(): boolean {
         return this.relativeExpiry !== undefined;
+    }
+    public isActivated(): boolean {
+        return this.isJoined();
+    }
+    /**
+     * Unimplemented
+     * @returns Status.Unknown
+     */
+    public get status(): Status {
+        return Status.Unknown;
     }
 
     public join(fociPreferred: Focus[], fociActive?: Focus): void {
@@ -133,7 +139,7 @@ export class LegacyMembershipManager implements IMembershipManager {
         this.relativeExpiry = this.membershipExpiryTimeout;
         // We don't wait for this, mostly because it may fail and schedule a retry, so this
         // function returning doesn't really mean anything at all.
-        this.triggerCallMembershipEventUpdate();
+        void this.triggerCallMembershipEventUpdate();
     }
 
     public async leave(timeout: number | undefined = undefined): Promise<boolean> {
@@ -203,7 +209,7 @@ export class LegacyMembershipManager implements IMembershipManager {
             this.updateCallMembershipRunning = false;
         }
     };
-    private makeNewMembership(deviceId: string): SessionMembershipData | {} {
+    private makeNewMembership(deviceId: string): SessionMembershipData | EmptyObject {
         // If we're joined, add our own
         if (this.isJoined()) {
             return this.makeMyMembership(deviceId);
@@ -239,7 +245,7 @@ export class LegacyMembershipManager implements IMembershipManager {
         const localDeviceId = this.client.getDeviceId();
         if (!localUserId || !localDeviceId) throw new Error("User ID or device ID was null!");
 
-        let newContent: {} | SessionMembershipData = {};
+        let newContent: EmptyObject | SessionMembershipData = {};
         // TODO: add back expiary logic to non-legacy events
         // previously we checked here if the event is timed out and scheduled a check if not.
         // maybe there is a better way.
@@ -311,6 +317,7 @@ export class LegacyMembershipManager implements IMembershipManager {
                 if (this.disconnectDelayId !== undefined) {
                     this.scheduleDelayDisconnection();
                 }
+                // TODO throw or log an error if this.disconnectDelayId === undefined
             } else {
                 // Not joined
                 let sentDelayedDisconnect = false;
@@ -350,7 +357,7 @@ export class LegacyMembershipManager implements IMembershipManager {
     }
 
     private scheduleDelayDisconnection(): void {
-        this.memberEventTimeout = setTimeout(this.delayDisconnection, this.membershipKeepAlivePeriod);
+        this.memberEventTimeout = setTimeout(() => void this.delayDisconnection(), this.membershipKeepAlivePeriod);
     }
 
     private readonly delayDisconnection = async (): Promise<void> => {

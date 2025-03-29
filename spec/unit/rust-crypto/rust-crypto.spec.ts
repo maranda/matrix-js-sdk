@@ -20,49 +20,50 @@ import {
     KeysQueryRequest,
     Migration,
     OlmMachine,
-    PickledInboundGroupSession,
-    PickledSession,
+    type PickledInboundGroupSession,
+    type PickledSession,
     StoreHandle,
 } from "@matrix-org/matrix-sdk-crypto-wasm";
-import { mocked, Mocked } from "jest-mock";
+import { mocked, type Mocked } from "jest-mock";
 import fetchMock from "fetch-mock-jest";
 
 import { RustCrypto } from "../../../src/rust-crypto/rust-crypto";
 import { initRustCrypto } from "../../../src/rust-crypto";
 import {
-    AccountDataEvents,
-    Device,
+    type AccountDataEvents,
+    type Device,
     DeviceVerification,
+    type EmptyObject,
     encodeBase64,
-    HttpApiEvent,
-    HttpApiEventHandlerMap,
-    IHttpOpts,
-    IToDeviceEvent,
-    MatrixClient,
+    type HttpApiEvent,
+    type HttpApiEventHandlerMap,
+    type IHttpOpts,
+    type IToDeviceEvent,
+    type MatrixClient,
     MatrixEvent,
     MatrixHttpApi,
     MemoryCryptoStore,
     TypedEventEmitter,
 } from "../../../src";
 import { emitPromise, mkEvent } from "../../test-utils/test-utils";
-import { CryptoBackend } from "../../../src/common-crypto/CryptoBackend";
-import { IEventDecryptionResult, IMegolmSessionData } from "../../../src/@types/crypto";
-import { OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
+import { type CryptoBackend } from "../../../src/common-crypto/CryptoBackend";
+import { type IEventDecryptionResult, type IMegolmSessionData } from "../../../src/@types/crypto";
+import { type OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
 import {
-    AccountDataClient,
-    AddSecretStorageKeyOpts,
-    SecretStorageCallbacks,
-    ServerSideSecretStorage,
+    type AccountDataClient,
+    type AddSecretStorageKeyOpts,
+    type SecretStorageCallbacks,
+    type ServerSideSecretStorage,
     ServerSideSecretStorageImpl,
 } from "../../../src/secret-storage";
 import {
-    CryptoCallbacks,
+    type CryptoCallbacks,
     EventShieldColour,
     EventShieldReason,
-    ImportRoomKeysOpts,
-    KeyBackupCheck,
-    KeyBackupInfo,
-    VerificationRequest,
+    type ImportRoomKeysOpts,
+    type KeyBackupCheck,
+    type KeyBackupInfo,
+    type VerificationRequest,
 } from "../../../src/crypto-api";
 import * as testData from "../../test-utils/test-data";
 import { E2EKeyReceiver } from "../../test-utils/E2EKeyReceiver";
@@ -70,10 +71,10 @@ import { E2EKeyResponder } from "../../test-utils/E2EKeyResponder";
 import { defer } from "../../../src/utils";
 import { logger } from "../../../src/logger";
 import { OutgoingRequestsManager } from "../../../src/rust-crypto/OutgoingRequestsManager";
-import { ClientEvent, ClientEventHandlerMap } from "../../../src/client";
-import { Curve25519AuthData } from "../../../src/crypto-api/keybackup";
+import { ClientEvent, type ClientEventHandlerMap } from "../../../src/client";
+import { type Curve25519AuthData } from "../../../src/crypto-api/keybackup";
 import encryptAESSecretStorageItem from "../../../src/utils/encryptAESSecretStorageItem.ts";
-import { CryptoStore, SecretStorePrivateKeys } from "../../../src/crypto/store/base";
+import { type CryptoStore, type SecretStorePrivateKeys } from "../../../src/crypto/store/base";
 import { CryptoEvent } from "../../../src/crypto-api/index.ts";
 import { RustBackupManager } from "../../../src/rust-crypto/backup.ts";
 
@@ -212,7 +213,7 @@ describe("initRustCrypto", () => {
             jest.spyOn(Migration, "migrateMegolmSessions").mockResolvedValue(undefined);
 
             const testOlmMachine = makeTestOlmMachine();
-            testOlmMachine.trackedUsers.mockResolvedValue([]);
+            testOlmMachine.trackedUsers.mockResolvedValue(new Set([]));
             jest.spyOn(OlmMachine, "initFromStore").mockResolvedValue(testOlmMachine);
         });
 
@@ -429,13 +430,18 @@ describe("initRustCrypto", () => {
             expect(session.senderSigningKey).toBe(undefined);
         }, 10000);
 
-        async function encryptAndStoreSecretKey(type: string, key: Uint8Array, pickleKey: string, store: CryptoStore) {
+        async function encryptAndStoreSecretKey(
+            type: string,
+            key: Uint8Array,
+            pickleKey: string,
+            store: MemoryCryptoStore,
+        ) {
             const encryptedKey = await encryptAESSecretStorageItem(encodeBase64(key), Buffer.from(pickleKey), type);
             store.storeSecretStorePrivateKey(undefined, type as keyof SecretStorePrivateKeys, encryptedKey);
         }
 
         /** Create a bunch of fake Olm sessions and stash them in the DB. */
-        function createSessions(store: CryptoStore, nDevices: number, nSessionsPerDevice: number) {
+        function createSessions(store: MemoryCryptoStore, nDevices: number, nSessionsPerDevice: number) {
             for (let i = 0; i < nDevices; i++) {
                 for (let j = 0; j < nSessionsPerDevice; j++) {
                     const sessionData = {
@@ -450,7 +456,7 @@ describe("initRustCrypto", () => {
         }
 
         /** Create a bunch of fake Megolm sessions and stash them in the DB. */
-        function createMegolmSessions(store: CryptoStore, nDevices: number, nSessionsPerDevice: number) {
+        function createMegolmSessions(store: MemoryCryptoStore, nDevices: number, nSessionsPerDevice: number) {
             for (let i = 0; i < nDevices; i++) {
                 for (let j = 0; j < nSessionsPerDevice; j++) {
                     store.storeEndToEndInboundGroupSession(
@@ -494,8 +500,10 @@ describe("RustCrypto", () => {
             const someRoomKeys = testData.MEGOLM_SESSION_DATA_ARRAY;
             let importTotal = 0;
             const opt: ImportRoomKeysOpts = {
-                progressCallback: (stage) => {
-                    importTotal = stage.total ?? 0;
+                progressCallback: (progress) => {
+                    if (progress.stage === "load_keys") {
+                        importTotal = progress.total;
+                    }
                 },
             };
             await rustCrypto.importRoomKeys(someRoomKeys, opt);
@@ -517,8 +525,10 @@ describe("RustCrypto", () => {
             const someRoomKeys = testData.MEGOLM_SESSION_DATA_ARRAY;
             let importTotal = 0;
             const opt: ImportRoomKeysOpts = {
-                progressCallback: (stage) => {
-                    importTotal = stage.total ?? 0;
+                progressCallback: (progress) => {
+                    if (progress.stage === "load_keys") {
+                        importTotal = progress.total;
+                    }
                 },
             };
             await rustCrypto.importRoomKeysAsJson(JSON.stringify(someRoomKeys), opt);
@@ -800,11 +810,6 @@ describe("RustCrypto", () => {
                     asJSON: jest.fn().mockReturnValue("{}"),
                 }),
                 saveBackupDecryptionKey: jest.fn(),
-                crossSigningStatus: jest.fn().mockResolvedValue({
-                    hasMaster: true,
-                    hasSelfSigning: true,
-                    hasUserSigning: true,
-                }),
                 exportCrossSigningKeys: jest.fn().mockResolvedValue({
                     masterKey: "sosecret",
                     userSigningKey: "secrets",
@@ -1005,34 +1010,6 @@ describe("RustCrypto", () => {
             await outgoingRequestsManager.doProcessOutgoingRequests();
 
             expect(deviceKeysAbsent).toBe(true);
-        });
-    });
-
-    describe(".getEventEncryptionInfo", () => {
-        let rustCrypto: RustCrypto;
-
-        beforeEach(async () => {
-            rustCrypto = await makeTestRustCrypto();
-        });
-
-        it("should handle unencrypted events", () => {
-            const event = mkEvent({ event: true, type: "m.room.message", content: { body: "xyz" } });
-            const res = rustCrypto.getEventEncryptionInfo(event);
-            expect(res.encrypted).toBeFalsy();
-        });
-
-        it("should handle encrypted events", async () => {
-            const event = mkEvent({ event: true, type: "m.room.encrypted", content: { algorithm: "fake_alg" } });
-            const mockCryptoBackend = {
-                decryptEvent: () =>
-                    ({
-                        senderCurve25519Key: "1234",
-                    }) as IEventDecryptionResult,
-            } as unknown as CryptoBackend;
-            await event.attemptDecryption(mockCryptoBackend);
-
-            const res = rustCrypto.getEventEncryptionInfo(event);
-            expect(res.encrypted).toBeTruthy();
         });
     });
 
@@ -2081,6 +2058,41 @@ describe("RustCrypto", () => {
                 expect(await secretStorage.get("org.matrix.msc3814")).not.toEqual(origDehydrationKey);
             });
         });
+
+        it("should handle errors when deleting a dehydrated device", async () => {
+            const rustCrypto = await makeTestRustCrypto(makeMatrixHttpApi());
+            const dehydratedDeviceManager = rustCrypto["dehydratedDeviceManager"];
+            fetchMock.config.overwriteRoutes = true;
+            // if the server doesn't support dehydrated devices, delete should succeed without throwing an error
+            fetchMock.delete("path:/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device", {
+                status: 404,
+                body: {
+                    errcode: "M_UNRECOGNIZED",
+                    error: "Unknown endpoint",
+                },
+            });
+            await dehydratedDeviceManager.delete();
+
+            // if there is no dehydrated device, delete should succeed without throwing an error
+            fetchMock.delete("path:/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device", {
+                status: 404,
+                body: {
+                    errcode: "M_NOT_FOUND",
+                    error: "Not found",
+                },
+            });
+            await dehydratedDeviceManager.delete();
+
+            // for any other error response, delete should throw an error
+            fetchMock.delete("path:/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device", {
+                status: 400,
+                body: {
+                    errcode: "M_UNKNOWN",
+                    error: "Unknown error",
+                },
+            });
+            await expect(dehydratedDeviceManager.delete()).rejects.toThrow();
+        });
     });
 
     describe("import & export secrets bundle", () => {
@@ -2246,13 +2258,15 @@ describe("RustCrypto", () => {
                 setDefaultKeyId: jest.fn(),
                 hasKey: jest.fn().mockResolvedValue(false),
                 getKey: jest.fn().mockResolvedValue(null),
+                store: jest.fn(),
+                getDefaultKeyId: jest.fn().mockResolvedValue("defaultKeyId"),
             } as unknown as ServerSideSecretStorage;
 
             fetchMock.post("path:/_matrix/client/v3/keys/upload", { one_time_key_counts: {} });
             fetchMock.post("path:/_matrix/client/v3/keys/signatures/upload", {});
         });
 
-        it("reset should reset 4S, backup and cross-signing", async () => {
+        it("reset should reset 4S, backup, cross-signing, and dehydrated device", async () => {
             // When we will delete the key backup
             let backupIsDeleted = false;
             fetchMock.delete("path:/_matrix/client/v3/room_keys/version/1", () => {
@@ -2262,6 +2276,12 @@ describe("RustCrypto", () => {
             // If the backup is deleted, we will return an empty object
             fetchMock.get("path:/_matrix/client/v3/room_keys/version", () => {
                 return backupIsDeleted ? {} : testData.SIGNED_BACKUP_DATA;
+            });
+
+            let dehydratedDeviceIsDeleted = false;
+            fetchMock.delete("path:/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device", () => {
+                dehydratedDeviceIsDeleted = true;
+                return { device_id: "ADEVICEID" };
             });
 
             // A new key backup should be created after the reset
@@ -2284,10 +2304,55 @@ describe("RustCrypto", () => {
             const authUploadDeviceSigningKeys = jest.fn();
             await rustCrypto.resetEncryption(authUploadDeviceSigningKeys);
 
+            // The secrets in 4S should be deleted
+            expect(secretStorage.store).toHaveBeenCalledWith("m.cross_signing.master", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.cross_signing.self_signing", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.cross_signing.user_signing", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.megolm_backup.v1", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.secret_storage.key.defaultKeyId", null);
             // A new key backup should be created
             expect(newKeyBackupInfo.auth_data).toBeTruthy();
             // The new cross signing keys should be uploaded
             expect(authUploadDeviceSigningKeys).toHaveBeenCalledWith(expect.any(Function));
+            // The dehydrated device was deleted
+            expect(dehydratedDeviceIsDeleted).toBeTruthy();
+        });
+    });
+
+    describe("disableKeyStorage", () => {
+        it("should disable key storage", async () => {
+            const secretStorage = {
+                getDefaultKeyId: jest.fn().mockResolvedValue("bloop"),
+                setDefaultKeyId: jest.fn(),
+                store: jest.fn(),
+            } as unknown as ServerSideSecretStorage;
+
+            fetchMock.get("path:/_matrix/client/v3/room_keys/version", testData.SIGNED_BACKUP_DATA);
+
+            let backupIsDeleted = false;
+            fetchMock.delete("path:/_matrix/client/v3/room_keys/version/1", () => {
+                backupIsDeleted = true;
+                return {};
+            });
+
+            let dehydratedDeviceIsDeleted = false;
+            fetchMock.delete("path:/_matrix/client/unstable/org.matrix.msc3814.v1/dehydrated_device", () => {
+                dehydratedDeviceIsDeleted = true;
+                return { device_id: "ADEVICEID" };
+            });
+
+            const rustCrypto = await makeTestRustCrypto(makeMatrixHttpApi(), undefined, undefined, secretStorage);
+            await rustCrypto.disableKeyStorage();
+
+            expect(secretStorage.store).toHaveBeenCalledWith("m.cross_signing.master", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.cross_signing.self_signing", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.cross_signing.user_signing", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.megolm_backup.v1", null);
+            expect(secretStorage.store).toHaveBeenCalledWith("m.secret_storage.key.bloop", null);
+            expect(secretStorage.setDefaultKeyId).toHaveBeenCalledWith(null);
+
+            expect(backupIsDeleted).toBeTruthy();
+            expect(dehydratedDeviceIsDeleted).toBeTruthy();
         });
     });
 });
@@ -2348,7 +2413,7 @@ class DummyAccountDataClient
         }
     }
 
-    public async setAccountData(eventType: string, content: any): Promise<{}> {
+    public async setAccountData(eventType: string, content: any): Promise<EmptyObject> {
         this.storage.set(eventType, content);
         this.emit(
             ClientEvent.AccountData,

@@ -86,12 +86,11 @@ module.exports = {
         // Disabled tests are a reality for now but as soon as all of the xits are
         // eliminated, we should enforce this.
         "jest/no-disabled-tests": "off",
-        // Also treat "oldBackendOnly" as a test function.
         // Used in some crypto tests.
         "jest/no-standalone-expect": [
             "error",
             {
-                additionalTestBlockFunctions: ["beforeAll", "beforeEach", "oldBackendOnly", "newBackendOnly"],
+                additionalTestBlockFunctions: ["beforeAll", "beforeEach"],
             },
         ],
     },
@@ -112,8 +111,13 @@ module.exports = {
                 "@typescript-eslint/ban-ts-comment": "off",
                 // We're okay with assertion errors when we ask for them
                 "@typescript-eslint/no-non-null-assertion": "off",
-                // We do this sometimes to brand interfaces
-                "@typescript-eslint/no-empty-object-type": "off",
+                "@typescript-eslint/no-empty-object-type": [
+                    "error",
+                    {
+                        // We do this sometimes to brand interfaces
+                        allowInterfaces: "with-single-extends",
+                    },
+                ],
 
                 "quotes": "off",
                 // We use a `logger` intermediary module
@@ -147,6 +151,18 @@ module.exports = {
                 // We don't need super strict typing in test utilities
                 "@typescript-eslint/explicit-function-return-type": "off",
                 "@typescript-eslint/explicit-member-accessibility": "off",
+                "@typescript-eslint/no-empty-object-type": "off",
+            },
+        },
+        {
+            // Enable stricter promise rules for the MatrixRTC codebase
+            files: ["src/matrixrtc/**/*.ts", "spec/unit/matrixrtc/*.ts"],
+            rules: {
+                // Encourage proper usage of Promises:
+                "@typescript-eslint/no-floating-promises": "error",
+                "@typescript-eslint/no-misused-promises": "error",
+                "@typescript-eslint/require-await": "error",
+                "@typescript-eslint/await-thenable": "error",
             },
         },
     ],

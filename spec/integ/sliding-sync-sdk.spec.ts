@@ -15,36 +15,42 @@ limitations under the License.
 */
 
 // eslint-disable-next-line no-restricted-imports
-import MockHttpBackend from "matrix-mock-request";
 import { fail } from "assert";
 
-import { SlidingSync, SlidingSyncEvent, MSC3575RoomData, SlidingSyncState, Extension } from "../../src/sliding-sync";
-import { TestClient } from "../TestClient";
-import { IRoomEvent, IStateEvent } from "../../src";
+import type MockHttpBackend from "matrix-mock-request";
 import {
-    MatrixClient,
-    MatrixEvent,
+    SlidingSync,
+    SlidingSyncEvent,
+    type MSC3575RoomData,
+    SlidingSyncState,
+    type Extension,
+} from "../../src/sliding-sync";
+import { TestClient } from "../TestClient";
+import { type IRoomEvent, type IStateEvent } from "../../src";
+import {
+    type MatrixClient,
+    type MatrixEvent,
     NotificationCountType,
     JoinRule,
     MatrixError,
     EventType,
-    IPushRules,
+    type IPushRules,
     PushRuleKind,
     TweakName,
     ClientEvent,
     RoomMemberEvent,
     RoomEvent,
-    Room,
-    IRoomTimelineData,
+    type Room,
+    type IRoomTimelineData,
 } from "../../src";
 import { SlidingSyncSdk } from "../../src/sliding-sync-sdk";
-import { SyncApiOptions, SyncState } from "../../src/sync";
-import { IStoredClientOpts } from "../../src";
+import { type SyncApiOptions, SyncState } from "../../src/sync";
+import { type IStoredClientOpts } from "../../src";
 import { logger } from "../../src/logger";
 import { emitPromise } from "../test-utils/test-utils";
 import { defer } from "../../src/utils";
 import { KnownMembership } from "../../src/@types/membership";
-import { SyncCryptoCallbacks } from "../../src/common-crypto/CryptoBackend";
+import { type SyncCryptoCallbacks } from "../../src/common-crypto/CryptoBackend";
 
 declare module "../../src/@types/event" {
     interface AccountDataEvents {
@@ -643,11 +649,13 @@ describe("SlidingSyncSdk", () => {
             ext = findExtension("e2ee");
         });
 
-        it("gets enabled on the initial request only", () => {
-            expect(ext.onRequest(true)).toEqual({
+        it("gets enabled all the time", async () => {
+            expect(await ext.onRequest(true)).toEqual({
                 enabled: true,
             });
-            expect(ext.onRequest(false)).toEqual(undefined);
+            expect(await ext.onRequest(false)).toEqual({
+                enabled: true,
+            });
         });
 
         it("can update device lists", () => {
@@ -689,11 +697,13 @@ describe("SlidingSyncSdk", () => {
             ext = findExtension("account_data");
         });
 
-        it("gets enabled on the initial request only", () => {
-            expect(ext.onRequest(true)).toEqual({
+        it("gets enabled all the time", async () => {
+            expect(await ext.onRequest(true)).toEqual({
                 enabled: true,
             });
-            expect(ext.onRequest(false)).toEqual(undefined);
+            expect(await ext.onRequest(false)).toEqual({
+                enabled: true,
+            });
         });
 
         it("processes global account data", async () => {
@@ -817,8 +827,12 @@ describe("SlidingSyncSdk", () => {
             ext = findExtension("to_device");
         });
 
-        it("gets enabled with a limit on the initial request only", () => {
-            const reqJson: any = ext.onRequest(true);
+        it("gets enabled all the time", async () => {
+            let reqJson: any = await ext.onRequest(true);
+            expect(reqJson.enabled).toEqual(true);
+            expect(reqJson.limit).toBeGreaterThan(0);
+            expect(reqJson.since).toBeUndefined();
+            reqJson = await ext.onRequest(false);
             expect(reqJson.enabled).toEqual(true);
             expect(reqJson.limit).toBeGreaterThan(0);
             expect(reqJson.since).toBeUndefined();
@@ -829,7 +843,7 @@ describe("SlidingSyncSdk", () => {
                 next_batch: "12345",
                 events: [],
             });
-            expect(ext.onRequest(false)).toEqual({
+            expect(await ext.onRequest(false)).toMatchObject({
                 since: "12345",
             });
         });
@@ -913,11 +927,13 @@ describe("SlidingSyncSdk", () => {
             ext = findExtension("typing");
         });
 
-        it("gets enabled on the initial request only", () => {
-            expect(ext.onRequest(true)).toEqual({
+        it("gets enabled all the time", async () => {
+            expect(await ext.onRequest(true)).toEqual({
                 enabled: true,
             });
-            expect(ext.onRequest(false)).toEqual(undefined);
+            expect(await ext.onRequest(false)).toEqual({
+                enabled: true,
+            });
         });
 
         it("processes typing notifications", async () => {
@@ -1036,11 +1052,13 @@ describe("SlidingSyncSdk", () => {
             ext = findExtension("receipts");
         });
 
-        it("gets enabled on the initial request only", () => {
-            expect(ext.onRequest(true)).toEqual({
+        it("gets enabled all the time", async () => {
+            expect(await ext.onRequest(true)).toEqual({
                 enabled: true,
             });
-            expect(ext.onRequest(false)).toEqual(undefined);
+            expect(await ext.onRequest(false)).toEqual({
+                enabled: true,
+            });
         });
 
         it("processes receipts", async () => {

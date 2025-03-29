@@ -19,7 +19,8 @@ import {
     KeysClaimRequest,
     KeysQueryRequest,
     KeysUploadRequest,
-    OlmMachine,
+    type OlmMachine,
+    type OutgoingRequest,
     PutDehydratedDeviceRequest,
     RoomMessageRequest,
     SignatureUploadRequest,
@@ -28,22 +29,11 @@ import {
 } from "@matrix-org/matrix-sdk-crypto-wasm";
 
 import { logger } from "../logger.ts";
-import { calculateRetryBackoff, IHttpOpts, MatrixHttpApi, Method } from "../http-api/index.ts";
-import { logDuration, QueryDict, sleep } from "../utils.ts";
-import { AuthDict, UIAuthCallback } from "../interactive-auth.ts";
-import { UIAResponse } from "../@types/uia.ts";
+import { calculateRetryBackoff, type IHttpOpts, type MatrixHttpApi, Method } from "../http-api/index.ts";
+import { logDuration, type QueryDict, sleep } from "../utils.ts";
+import { type AuthDict, type UIAuthCallback } from "../interactive-auth.ts";
 import { ToDeviceMessageId } from "../@types/event.ts";
 import { UnstablePrefix as DehydrationUnstablePrefix } from "./DehydratedDeviceManager.ts";
-
-/**
- * Common interface for all the request types returned by `OlmMachine.outgoingRequests`.
- *
- * @internal
- */
-export interface OutgoingRequest {
-    readonly id: string | undefined;
-    readonly type: number;
-}
 
 /**
  * OutgoingRequestManager: turns `OutgoingRequest`s from the rust sdk into HTTP requests
@@ -176,7 +166,7 @@ export class OutgoingRequestProcessor {
         }
 
         const parsedBody = JSON.parse(body);
-        const makeRequest = async (auth: AuthDict | null): Promise<UIAResponse<T>> => {
+        const makeRequest = async (auth: AuthDict | null): Promise<T> => {
             const newBody: Record<string, any> = {
                 ...parsedBody,
             };
@@ -229,6 +219,12 @@ export class OutgoingRequestProcessor {
 
             // we use the full prefix
             prefix: "",
+
+            // We set a timeout of 60 seconds to guard against requests getting stuck forever and wedging the
+            // request loop (cf https://github.com/element-hq/element-web/issues/29534).
+            //
+            // (XXX: should we do this in the whole of the js-sdk?)
+            localTimeoutMs: 60000,
         };
 
         return await this.http.authedRequest<string>(method, path, queryParams, body, opts);

@@ -19,30 +19,37 @@ import { NotificationCountType, Room, RoomEvent } from "./models/room.ts";
 import { logger } from "./logger.ts";
 import { promiseMapSeries } from "./utils.ts";
 import { EventTimeline } from "./models/event-timeline.ts";
-import { ClientEvent, IStoredClientOpts, MatrixClient } from "./client.ts";
+import { ClientEvent, type IStoredClientOpts, type MatrixClient } from "./client.ts";
 import {
-    ISyncStateData,
+    type ISyncStateData,
     SyncState,
     _createAndReEmitRoom,
-    SyncApiOptions,
+    type SyncApiOptions,
     defaultClientOpts,
     defaultSyncApiOpts,
-    SetPresence,
+    type SetPresence,
+    mapToDeviceEvent,
 } from "./sync.ts";
-import { MatrixEvent } from "./models/event.ts";
-import { IMinimalEvent, IRoomEvent, IStateEvent, IStrippedState, ISyncResponse } from "./sync-accumulator.ts";
+import { type MatrixEvent } from "./models/event.ts";
+import {
+    type IMinimalEvent,
+    type IRoomEvent,
+    type IStateEvent,
+    type IStrippedState,
+    type ISyncResponse,
+} from "./sync-accumulator.ts";
 import { MatrixError } from "./http-api/index.ts";
 import {
-    Extension,
+    type Extension,
     ExtensionState,
-    MSC3575RoomData,
-    MSC3575SlidingSyncResponse,
-    SlidingSync,
+    type MSC3575RoomData,
+    type MSC3575SlidingSyncResponse,
+    type SlidingSync,
     SlidingSyncEvent,
     SlidingSyncState,
 } from "./sliding-sync.ts";
 import { EventType } from "./@types/event.ts";
-import { IPushRules } from "./@types/PushRules.ts";
+import { type IPushRules } from "./@types/PushRules.ts";
 import { RoomStateEvent } from "./models/room-state.ts";
 import { RoomMemberEvent } from "./models/room-member.ts";
 import { KnownMembership } from "./@types/membership.ts";
@@ -75,9 +82,16 @@ class ExtensionE2EE implements Extension<ExtensionE2EERequest, ExtensionE2EEResp
         return ExtensionState.PreProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionE2EERequest | undefined {
-        if (!isInitial) {
-            return undefined;
+    public async onRequest(isInitial: boolean): Promise<ExtensionE2EERequest> {
+        if (isInitial) {
+            // In SSS, the `?pos=` contains the stream position for device list updates.
+            // If we do not have a `?pos=` (e.g because we forgot it, or because the server
+            // invalidated our connection) then we MUST invlaidate all device lists because
+            // the server will not tell us the delta. This will then cause UTDs as we will fail
+            // to encrypt for new devices. This is an expensive call, so we should
+            // really really remember `?pos=` wherever possible.
+            logger.log("ExtensionE2EE: invalidating all device lists due to missing 'pos'");
+            await this.crypto.markAllTrackedUsersAsDirty();
         }
         return {
             enabled: true, // this is sticky so only send it on the initial request
@@ -127,15 +141,12 @@ class ExtensionToDevice implements Extension<ExtensionToDeviceRequest, Extension
         return ExtensionState.PreProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionToDeviceRequest {
-        const extReq: ExtensionToDeviceRequest = {
+    public async onRequest(isInitial: boolean): Promise<ExtensionToDeviceRequest> {
+        return {
             since: this.nextBatch !== null ? this.nextBatch : undefined,
+            limit: 100,
+            enabled: true,
         };
-        if (isInitial) {
-            extReq["limit"] = 100;
-            extReq["enabled"] = true;
-        }
-        return extReq;
     }
 
     public async onResponse(data: ExtensionToDeviceResponse): Promise<void> {
@@ -145,7 +156,7 @@ class ExtensionToDevice implements Extension<ExtensionToDeviceRequest, Extension
             events = await this.cryptoCallbacks.preprocessToDeviceMessages(events);
         }
         events
-            .map(this.client.getEventMapper())
+            .map(mapToDeviceEvent)
             .map((toDeviceEvent) => {
                 // map is a cheap inline forEach
                 // We want to flag m.key.verification.start events as cancelled
@@ -209,10 +220,7 @@ class ExtensionAccountData implements Extension<ExtensionAccountDataRequest, Ext
         return ExtensionState.PostProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionAccountDataRequest | undefined {
-        if (!isInitial) {
-            return undefined;
-        }
+    public async onRequest(isInitial: boolean): Promise<ExtensionAccountDataRequest> {
         return {
             enabled: true,
         };
@@ -279,10 +287,7 @@ class ExtensionTyping implements Extension<ExtensionTypingRequest, ExtensionTypi
         return ExtensionState.PostProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionTypingRequest | undefined {
-        if (!isInitial) {
-            return undefined; // don't send a JSON object for subsequent requests, we don't need to.
-        }
+    public async onRequest(isInitial: boolean): Promise<ExtensionTypingRequest> {
         return {
             enabled: true,
         };
@@ -318,13 +323,10 @@ class ExtensionReceipts implements Extension<ExtensionReceiptsRequest, Extension
         return ExtensionState.PostProcess;
     }
 
-    public onRequest(isInitial: boolean): ExtensionReceiptsRequest | undefined {
-        if (isInitial) {
-            return {
-                enabled: true,
-            };
-        }
-        return undefined; // don't send a JSON object for subsequent requests, we don't need to.
+    public async onRequest(isInitial: boolean): Promise<ExtensionReceiptsRequest> {
+        return {
+            enabled: true,
+        };
     }
 
     public async onResponse(data: ExtensionReceiptsResponse): Promise<void> {
@@ -435,6 +437,7 @@ export class SlidingSyncSdk {
                     }
                 } else {
                     this.failCount = 0;
+                    logger.log(`SlidingSyncState.RequestFinished with ${Object.keys(resp?.rooms || []).length} rooms`);
                 }
                 break;
         }
@@ -573,7 +576,7 @@ export class SlidingSyncSdk {
 
         // TODO: handle threaded / beacon events
 
-        if (roomData.initial) {
+        if (roomData.limited || roomData.initial) {
             // we should not know about any of these timeline entries if this is a genuinely new room.
             // If we do, then we've effectively done scrollback (e.g requesting timeline_limit: 1 for
             // this room, then timeline_limit: 50).
@@ -630,6 +633,9 @@ export class SlidingSyncSdk {
                 room.setUnreadNotificationCount(NotificationCountType.Highlight, roomData.highlight_count);
             }
         }
+        if (roomData.bump_stamp) {
+            room.setBumpStamp(roomData.bump_stamp);
+        }
 
         if (Number.isInteger(roomData.invited_count)) {
             room.currentState.setInvitedMemberCount(roomData.invited_count!);
@@ -649,11 +655,10 @@ export class SlidingSyncSdk {
             inviteStateEvents.forEach((e) => {
                 this.client.emit(ClientEvent.Event, e);
             });
-            room.updateMyMembership(KnownMembership.Invite);
             return;
         }
 
-        if (roomData.initial) {
+        if (roomData.limited) {
             // set the back-pagination token. Do this *before* adding any
             // events so that clients can start back-paginating.
             room.getLiveTimeline().setPaginationToken(roomData.prev_batch ?? null, EventTimeline.BACKWARDS);
@@ -720,6 +725,8 @@ export class SlidingSyncSdk {
         // local fields must be set before any async calls because call site assumes
         // synchronous execution prior to emitting SlidingSyncState.Complete
         room.updateMyMembership(KnownMembership.Join);
+
+        room.setMSC4186SummaryData(roomData.heroes, roomData.joined_count, roomData.invited_count);
 
         room.recalculate();
         if (roomData.initial) {

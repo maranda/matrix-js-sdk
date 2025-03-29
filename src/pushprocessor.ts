@@ -16,26 +16,26 @@ limitations under the License.
 
 import { deepCompare, escapeRegExp, globToRegexp, isNullOrUndefined } from "./utils.ts";
 import { logger } from "./logger.ts";
-import { MatrixClient } from "./client.ts";
-import { MatrixEvent } from "./models/event.ts";
+import { type MatrixClient } from "./client.ts";
+import { type MatrixEvent } from "./models/event.ts";
 import {
     ConditionKind,
-    IAnnotatedPushRule,
-    ICallStartedCondition,
-    ICallStartedPrefixCondition,
-    IContainsDisplayNameCondition,
-    IEventMatchCondition,
-    IEventPropertyContainsCondition,
-    IEventPropertyIsCondition,
-    IPushRule,
-    IPushRules,
-    IRoomMemberCountCondition,
-    ISenderNotificationPermissionCondition,
-    PushRuleAction,
+    type IAnnotatedPushRule,
+    type ICallStartedCondition,
+    type ICallStartedPrefixCondition,
+    type IContainsDisplayNameCondition,
+    type IEventMatchCondition,
+    type IEventPropertyContainsCondition,
+    type IEventPropertyIsCondition,
+    type IPushRule,
+    type IPushRules,
+    type IRoomMemberCountCondition,
+    type ISenderNotificationPermissionCondition,
+    type PushRuleAction,
     PushRuleActionName,
-    PushRuleCondition,
+    type PushRuleCondition,
     PushRuleKind,
-    PushRuleSet,
+    type PushRuleSet,
     RuleId,
     TweakName,
 } from "./@types/PushRules.ts";
@@ -309,6 +309,28 @@ export class PushProcessor {
     }
 
     /**
+     * Create a RegExp object for the given glob pattern with a single capture group around the pattern itself, caching the result.
+     * No cache invalidation is present currently,
+     * as this will be inherently bounded to the size of the user's own push rules.
+     * @param pattern - the glob pattern to convert to a RegExp
+     * @param alignToWordBoundary - whether to align the pattern to word boundaries,
+     *     as specified for `content.body` matches, will use lookaround assertions to ensure the match only includes the pattern
+     * @param flags - the flags to pass to the RegExp constructor, defaults to case-insensitive
+     */
+    public static getPushRuleGlobRegex(pattern: string, alignToWordBoundary = false, flags = "i"): RegExp {
+        const [prefix, suffix] = alignToWordBoundary ? ["(?<=^|\\W)", "(?=\\W|$)"] : ["^", "$"];
+        const cacheKey = `${alignToWordBoundary}-${flags}-${pattern}`;
+
+        if (!PushProcessor.cachedGlobToRegex[cacheKey]) {
+            PushProcessor.cachedGlobToRegex[cacheKey] = new RegExp(
+                prefix + "(" + globToRegexp(pattern) + ")" + suffix,
+                flags,
+            );
+        }
+        return PushProcessor.cachedGlobToRegex[cacheKey];
+    }
+
+    /**
      * Pre-caches the parsed keys for push rules and cleans out any obsolete cache
      * entries. Should be called after push rules are updated.
      * @param newRules - The new push rules.
@@ -567,11 +589,9 @@ export class PushProcessor {
             return false;
         }
 
-        const regex =
-            cond.key === "content.body"
-                ? this.createCachedRegex("(^|\\W)", cond.pattern, "(\\W|$)")
-                : this.createCachedRegex("^", cond.pattern, "$");
-
+        // Align to word boundary on `content.body` matches, whole string otherwise
+        // https://spec.matrix.org/v1.13/client-server-api/#conditions-1
+        const regex = PushProcessor.getPushRuleGlobRegex(cond.pattern, cond.key === "content.body");
         return !!val.match(regex);
     }
 
@@ -619,17 +639,6 @@ export class PushProcessor {
             (ev.getPrevContent()["m.terminated"] !== ev.getContent()["m.terminated"] ||
                 deepCompare(ev.getPrevContent(), {}))
         );
-    }
-
-    private createCachedRegex(prefix: string, glob: string, suffix: string): RegExp {
-        if (PushProcessor.cachedGlobToRegex[glob]) {
-            return PushProcessor.cachedGlobToRegex[glob];
-        }
-        PushProcessor.cachedGlobToRegex[glob] = new RegExp(
-            prefix + globToRegexp(glob) + suffix,
-            "i", // Case insensitive
-        );
-        return PushProcessor.cachedGlobToRegex[glob];
     }
 
     /**

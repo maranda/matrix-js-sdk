@@ -14,30 +14,35 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { OlmMachine, SignatureVerification } from "@matrix-org/matrix-sdk-crypto-wasm";
+import { type OlmMachine, type SignatureVerification } from "@matrix-org/matrix-sdk-crypto-wasm";
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 
 import {
-    BackupTrustInfo,
-    Curve25519AuthData,
-    KeyBackupCheck,
-    KeyBackupInfo,
-    KeyBackupSession,
-    Curve25519SessionData,
-    KeyBackupRestoreOpts,
-    KeyBackupRestoreResult,
-    KeyBackupRoomSessions,
+    type BackupTrustInfo,
+    type Curve25519AuthData,
+    type KeyBackupCheck,
+    type KeyBackupInfo,
+    type KeyBackupSession,
+    type Curve25519SessionData,
+    type KeyBackupRestoreOpts,
+    type KeyBackupRestoreResult,
+    type KeyBackupRoomSessions,
 } from "../crypto-api/keybackup.ts";
 import { logger } from "../logger.ts";
-import { ClientPrefix, IHttpOpts, MatrixError, MatrixHttpApi, Method } from "../http-api/index.ts";
+import { ClientPrefix, type IHttpOpts, MatrixError, type MatrixHttpApi, Method } from "../http-api/index.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
 import { encodeUri, logDuration } from "../utils.ts";
-import { OutgoingRequestProcessor } from "./OutgoingRequestProcessor.ts";
+import { type OutgoingRequestProcessor } from "./OutgoingRequestProcessor.ts";
 import { sleep } from "../utils.ts";
-import { BackupDecryptor } from "../common-crypto/CryptoBackend.ts";
-import { ImportRoomKeyProgressData, ImportRoomKeysOpts, CryptoEvent } from "../crypto-api/index.ts";
-import { AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
-import { IMegolmSessionData } from "../@types/crypto.ts";
+import { type BackupDecryptor } from "../common-crypto/CryptoBackend.ts";
+import {
+    type ImportRoomKeyProgressData,
+    type ImportRoomKeysOpts,
+    CryptoEvent,
+    ImportRoomKeyStage,
+} from "../crypto-api/index.ts";
+import { type AESEncryptedSecretStoragePayload } from "../@types/AESEncryptedSecretStoragePayload.ts";
+import { type IMegolmSessionData } from "../@types/crypto.ts";
 
 /** Authentification of the backup info, depends on algorithm */
 type AuthData = KeyBackupInfo["auth_data"];
@@ -118,7 +123,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
     /**
      * Determine if a key backup can be trusted.
      *
-     * @param info - key backup info dict from {@link MatrixClient#getKeyBackupVersion}.
+     * @param info - key backup info dict from {@link CryptoApi.getKeyBackupInfo}.
      */
     public async isKeyBackupTrusted(info: KeyBackupInfo): Promise<BackupTrustInfo> {
         const signatureVerification: SignatureVerification = await this.olmMachine.verifyBackup(info);
@@ -161,12 +166,17 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
     public async handleBackupSecretReceived(secret: string): Promise<boolean> {
         // Currently we only receive the decryption key without any key backup version. It is important to
         // check that the secret is valid for the current version before storing it.
-        // We force a check to ensure to have the latest version. We also want to check that the backup is trusted
-        // as we don't want to store the secret if the backup is not trusted, and eventually import megolm keys later from an untrusted backup.
-        const backupCheck = await this.checkKeyBackupAndEnable(true);
+        // We force a check to ensure to have the latest version.
+        let latestBackupInfo: KeyBackupInfo | null;
+        try {
+            latestBackupInfo = await this.requestKeyBackupVersion();
+        } catch (e) {
+            logger.warn("handleBackupSecretReceived: Error checking for latest key backup", e);
+            return false;
+        }
 
-        if (!backupCheck?.backupInfo?.version || !backupCheck.trustInfo.trusted) {
-            // There is no server-side key backup, or the backup is not signed by a trusted cross-signing key or trusted own device.
+        if (!latestBackupInfo?.version) {
+            // There is no server-side key backup.
             // This decryption key is useless to us.
             logger.warn(
                 "handleBackupSecretReceived: Received a backup decryption key, but there is no trusted server-side key backup",
@@ -176,7 +186,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
 
         try {
             const backupDecryptionKey = RustSdkCryptoJs.BackupDecryptionKey.fromBase64(secret);
-            const privateKeyMatches = backupInfoMatchesBackupDecryptionKey(backupCheck.backupInfo, backupDecryptionKey);
+            const privateKeyMatches = backupInfoMatchesBackupDecryptionKey(latestBackupInfo, backupDecryptionKey);
             if (!privateKeyMatches) {
                 logger.warn(
                     `handleBackupSecretReceived: Private decryption key does not match the public key of the current remote backup.`,
@@ -187,7 +197,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
             logger.info(
                 `handleBackupSecretReceived: A valid backup decryption key has been received and stored in cache.`,
             );
-            await this.saveBackupDecryptionKey(backupDecryptionKey, backupCheck.backupInfo.version);
+            await this.saveBackupDecryptionKey(backupDecryptionKey, latestBackupInfo.version);
             return true;
         } catch (e) {
             logger.warn("handleBackupSecretReceived: Invalid backup decryption key", e);
@@ -230,7 +240,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
             const importOpt: ImportRoomKeyProgressData = {
                 total: Number(total),
                 successes: Number(progress),
-                stage: "load_keys",
+                stage: ImportRoomKeyStage.LoadKeys,
                 failures: 0,
             };
             opts?.progressCallback?.(importOpt);
@@ -259,7 +269,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
                 const importOpt: ImportRoomKeyProgressData = {
                     total: Number(total),
                     successes: Number(progress),
-                    stage: "load_keys",
+                    stage: ImportRoomKeyStage.LoadKeys,
                     failures: Number(failures),
                 };
                 opts?.progressCallback?.(importOpt);
@@ -303,7 +313,9 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
 
         const trustInfo = await this.isKeyBackupTrusted(backupInfo);
 
-        if (!trustInfo.trusted) {
+        // Per the spec, we should enable key upload if either (a) the backup is signed by a trusted key, or
+        // (b) the public key matches the private decryption key that we have received from 4S.
+        if (!trustInfo.matchesDecryptionKey && !trustInfo.trusted) {
             if (activeVersion !== null) {
                 logger.log("Key backup present on server but not trusted: disabling key backup");
                 await this.disableKeyBackup();
@@ -386,7 +398,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
 
             while (!this.stopped) {
                 // Get a batch of room keys to upload
-                let request: RustSdkCryptoJs.KeysBackupRequest | null = null;
+                let request: RustSdkCryptoJs.KeysBackupRequest | undefined = undefined;
                 try {
                     request = await logDuration(
                         logger,
@@ -612,9 +624,6 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
         opts?: KeyBackupRestoreOpts,
     ): Promise<KeyBackupRestoreResult> {
         const keyBackup = await this.downloadKeyBackup(backupVersion);
-        opts?.progressCallback?.({
-            stage: "load_keys",
-        });
 
         return this.importKeyBackup(keyBackup, backupVersion, backupDecryptor, opts);
     }
@@ -665,6 +674,13 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
         let totalImported = 0;
         let totalFailures = 0;
 
+        opts?.progressCallback?.({
+            total: totalKeyCount,
+            successes: totalImported,
+            stage: ImportRoomKeyStage.LoadKeys,
+            failures: totalFailures,
+        });
+
         /**
          * This method is called when we have enough chunks to decrypt.
          * It will decrypt the chunks and try to import the room keys.
@@ -697,7 +713,7 @@ export class RustBackupManager extends TypedEventEmitter<RustBackupCryptoEvents,
             opts?.progressCallback?.({
                 total: totalKeyCount,
                 successes: totalImported,
-                stage: "load_keys",
+                stage: ImportRoomKeyStage.LoadKeys,
                 failures: totalFailures,
             });
         };

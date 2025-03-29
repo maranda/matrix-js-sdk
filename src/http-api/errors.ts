@@ -14,10 +14,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-import { IMatrixApiError as IWidgetMatrixError } from "matrix-widget-api";
+import { type IMatrixApiError as IWidgetMatrixError } from "matrix-widget-api";
 
-import { IUsageLimit } from "../@types/partials.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type IUsageLimit } from "../@types/partials.ts";
+import { type MatrixEvent } from "../models/event.ts";
 
 interface IErrorJson extends Partial<IUsageLimit> {
     [key: string]: any; // extensible
@@ -195,5 +195,34 @@ export class ConnectionError extends Error {
 
     public get name(): string {
         return "ConnectionError";
+    }
+}
+
+/**
+ * Construct a TokenRefreshError. This indicates that a request failed due to the token being expired,
+ * and attempting to refresh said token also failed but in a way which was not indicative of token invalidation.
+ * Assumed to be a temporary failure.
+ */
+export class TokenRefreshError extends Error {
+    public constructor(cause?: Error) {
+        super(cause?.message ?? "");
+    }
+
+    public get name(): string {
+        return "TokenRefreshError";
+    }
+}
+
+/**
+ * Construct a TokenRefreshError. This indicates that a request failed due to the token being expired,
+ * and attempting to refresh said token failed in a way indicative of token invalidation.
+ */
+export class TokenRefreshLogoutError extends Error {
+    public constructor(cause?: Error) {
+        super(cause?.message ?? "");
+    }
+
+    public get name(): string {
+        return "TokenRefreshLogoutError";
     }
 }

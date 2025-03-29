@@ -15,11 +15,11 @@ limitations under the License.
 */
 
 import { logger as rootLogger } from "../logger.ts";
-import { MatrixClient, ClientEvent } from "../client.ts";
+import { type MatrixClient, ClientEvent } from "../client.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
-import { Room, RoomEvent } from "../models/room.ts";
-import { RoomState, RoomStateEvent } from "../models/room-state.ts";
-import { MatrixEvent } from "../models/event.ts";
+import { type Room, RoomEvent } from "../models/room.ts";
+import { type RoomState, RoomStateEvent } from "../models/room-state.ts";
+import { type MatrixEvent } from "../models/event.ts";
 import { MatrixRTCSession } from "./MatrixRTCSession.ts";
 import { EventType } from "../@types/event.ts";
 
@@ -71,7 +71,7 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
 
     public stop(): void {
         for (const sess of this.roomSessions.values()) {
-            sess.stop();
+            void sess.stop();
         }
         this.roomSessions.clear();
 
@@ -108,7 +108,7 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
                     `Decryption failed for event ${event.getId()}: ${event.decryptionFailureReason} will retry once only`,
                 );
                 // retry after 1 second. After this we give up.
-                setTimeout(() => this.consumeCallEncryptionEvent(event, true), 1000);
+                setTimeout(() => void this.consumeCallEncryptionEvent(event, true), 1000);
             } else {
                 logger.warn(`Decryption failed for event ${event.getId()}: ${event.decryptionFailureReason}`);
             }
@@ -128,7 +128,7 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
         this.getRoomSession(room).onCallEncryption(event);
     }
     private onTimeline = (event: MatrixEvent): void => {
-        this.consumeCallEncryptionEvent(event);
+        void this.consumeCallEncryptionEvent(event);
     };
 
     private onRoom = (room: Room): void => {

@@ -20,12 +20,12 @@ limitations under the License.
 
 import unhomoglyph from "unhomoglyph";
 import promiseRetry from "p-retry";
-import { Optional } from "matrix-events-sdk";
+import { type Optional } from "matrix-events-sdk";
 
-import { IEvent, MatrixEvent } from "./models/event.ts";
+import { type IEvent, type MatrixEvent } from "./models/event.ts";
 import { M_TIMESTAMP } from "./@types/location.ts";
 import { ReceiptType } from "./@types/read_receipts.ts";
-import { BaseLogger } from "./logger.ts";
+import { type BaseLogger } from "./logger.ts";
 
 const interns = new Map<string, string>();
 
@@ -399,6 +399,23 @@ export async function logDuration<T>(logger: BaseLogger, name: string, block: ()
     const start = Date.now();
     try {
         return await block();
+    } finally {
+        const end = Date.now();
+        logger.debug(`[Perf]: ${name} took ${end - start}ms`);
+    }
+}
+
+/**
+ * Utility to log the duration of a synchronous block.
+ *
+ * @param logger - The logger to log to.
+ * @param name - The name of the operation.
+ * @param block - The block to execute.
+ */
+export function logDurationSync<T>(logger: BaseLogger, name: string, block: () => T): T {
+    const start = Date.now();
+    try {
+        return block();
     } finally {
         const end = Date.now();
         logger.debug(`[Perf]: ${name} took ${end - start}ms`);
