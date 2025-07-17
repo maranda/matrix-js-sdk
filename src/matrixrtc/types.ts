@@ -15,17 +15,69 @@ limitations under the License.
 */
 import type { IMentions } from "../matrix.ts";
 import type { CallMembership } from "./CallMembership.ts";
-import type { Focus } from "./focus.ts";
+
+export type ParticipantId = string;
 
 export interface EncryptionKeyEntry {
     index: number;
     key: string;
 }
 
+/**
+ * The mxID, deviceId and membership timestamp of a RTC session participant.
+ */
+export type ParticipantDeviceInfo = {
+    userId: string;
+    deviceId: string;
+    membershipTs: number;
+};
+
+/**
+ * A type representing the information needed to decrypt video streams.
+ */
+export type InboundEncryptionSession = {
+    key: Uint8Array;
+    participantId: ParticipantId;
+    keyIndex: number;
+    creationTS: number;
+};
+
+/**
+ * The information about the key used to encrypt video streams.
+ */
+export type OutboundEncryptionSession = {
+    key: Uint8Array;
+    creationTS: number;
+    // The devices that this key is shared with.
+    sharedWith: Array<ParticipantDeviceInfo>;
+    // This is an index acting as the id of the key
+    keyId: number;
+};
+
 export interface EncryptionKeysEventContent {
     keys: EncryptionKeyEntry[];
     device_id: string;
     call_id: string;
+    sent_ts?: number;
+}
+
+/**
+ * THe content of a to-device event that contains encryption keys.
+ */
+export interface EncryptionKeysToDeviceEventContent {
+    keys: { index: number; key: string };
+    member: {
+        // TODO Remove that it is claimed, need to get the sealed sender from decryption info
+        // Or add some validation on it based on the encryption info
+        claimed_device_id: string;
+    };
+    room_id: string;
+    session: {
+        application: string;
+        call_id: string;
+        scope: string;
+    };
+    // Why is this needed?
     sent_ts?: number;
 }
 
@@ -49,71 +101,28 @@ export enum Status {
     Unknown = "Unknown",
 }
 
-export enum MembershipManagerEvent {
-    StatusChanged = "StatusChanged",
-}
-
-export type MembershipManagerEventHandlerMap = {
-    [MembershipManagerEvent.StatusChanged]: (prefStatus: Status, newStatus: Status) => void;
+/**
+ * A type collecting call encryption statistics for a session.
+ */
+export type Statistics = {
+    counters: {
+        /**
+         * The number of times we have sent a room event containing encryption keys.
+         */
+        roomEventEncryptionKeysSent: number;
+        /**
+         * The number of times we have received a room event containing encryption keys.
+         */
+        roomEventEncryptionKeysReceived: number;
+    };
+    totals: {
+        /**
+         * The total age (in milliseconds) of all room events containing encryption keys that we have received.
+         * We track the total age so that we can later calculate the average age of all keys received.
+         */
+        roomEventEncryptionKeysReceivedTotalAge: number;
+    };
 };
 
-/**
- * This interface defines what a MembershipManager uses and exposes.
- * This interface is what we use to write tests and allows changing the actual implementation
- * without breaking tests because of some internal method renaming.
- *
- * @internal
- */
-export interface IMembershipManager {
-    /**
-     * If we are trying to join, or have successfully joined the session.
-     * It does not reflect if the room state is already configured to represent us being joined.
-     * It only means that the Manager should be trying to connect or to disconnect running.
-     * The Manager is still running right after isJoined becomes false to send the disconnect events.
-     * @returns true if we intend to be participating in the MatrixRTC session
-     * @deprecated This name is confusing and replaced by `isActivated()`. (Returns the same as `isActivated()`)
-     */
-    isJoined(): boolean;
-    /**
-     * If the manager is activated. This means it tries to do its job to join the call, resend state events...
-     * It does not imply that the room state is already configured to represent being joined.
-     * It means that the Manager tries to connect or is connected. ("the manager is still active")
-     * Once `leave()` is called the manager is not activated anymore but still running until `leave()` resolves.
-     * @returns `true` if we intend to be participating in the MatrixRTC session
-     */
-    isActivated(): boolean;
-    /**
-     * Get the actual connection status of the manager.
-     */
-    get status(): Status;
-    /**
-     * The current status while the manager is activated
-     */
-    /**
-     * Start sending all necessary events to make this user participate in the RTC session.
-     * @param fociPreferred the list of preferred foci to use in the joined RTC membership event.
-     * @param fociActive the active focus to use in the joined RTC membership event.
-     * @throws can throw if it exceeds a configured maximum retry.
-     */
-    join(fociPreferred: Focus[], fociActive?: Focus, onError?: (error: unknown) => void): void;
-    /**
-     * Send all necessary events to make this user leave the RTC session.
-     * @param timeout the maximum duration in ms until the promise is forced to resolve.
-     * @returns It resolves with true in case the leave was sent successfully.
-     * It resolves with false in case we hit the timeout before sending successfully.
-     */
-    leave(timeout?: number): Promise<boolean>;
-    /**
-     * Call this if the MatrixRTC session members have changed.
-     */
-    onRTCSessionMemberUpdate(memberships: CallMembership[]): Promise<void>;
-    /**
-     * The used active focus in the currently joined session.
-     * @returns the used active focus in the currently joined session or undefined if not joined.
-     */
-    getActiveFocus(): Focus | undefined;
-
-    // TypedEventEmitter methods:
-    on(event: MembershipManagerEvent.StatusChanged, listener: (oldStatus: Status, newStatus: Status) => void): this;
-    off(event: MembershipManagerEvent.StatusChanged, listener: (oldStatus: Status, newStatus: Status) => void): this;
-}
+export const isMyMembership = (m: CallMembership, userId: string, deviceId: string): boolean =>
+    m.sender === userId && m.deviceId === deviceId;

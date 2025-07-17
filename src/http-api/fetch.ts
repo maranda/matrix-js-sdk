@@ -18,10 +18,10 @@ limitations under the License.
  * This is an internal module. See {@link MatrixHttpApi} for the public class.
  */
 
-import { checkObjectHasKeys, encodeParams } from "../utils.ts";
+import { checkObjectHasKeys, deepCopy, encodeParams } from "../utils.ts";
 import { type TypedEventEmitter } from "../models/typed-event-emitter.ts";
 import { Method } from "./method.ts";
-import { ConnectionError, MatrixError, TokenRefreshError, TokenRefreshLogoutError } from "./errors.ts";
+import { ConnectionError, MatrixError, TokenRefreshError } from "./errors.ts";
 import {
     HttpApiEvent,
     type HttpApiEventHandlerMap,
@@ -31,7 +31,7 @@ import {
 } from "./interface.ts";
 import { anySignal, parseErrorResponse, timeoutSignal } from "./utils.ts";
 import { type QueryDict } from "../utils.ts";
-import { singleAsyncExecution } from "../utils/decorators.ts";
+import { TokenRefresher, TokenRefreshOutcome } from "./refresh.ts";
 
 interface TypedResponse<T> extends Response {
     json(): Promise<T>;
@@ -43,14 +43,9 @@ export type ResponseType<T, O extends IHttpOpts> = O extends { json: false }
       ? T
       : TypedResponse<T>;
 
-const enum TokenRefreshOutcome {
-    Success = "success",
-    Failure = "failure",
-    Logout = "logout",
-}
-
 export class FetchHttpApi<O extends IHttpOpts> {
     private abortController = new AbortController();
+    private readonly tokenRefresher: TokenRefresher;
 
     public constructor(
         private eventEmitter: TypedEventEmitter<HttpApiEvent, HttpApiEventHandlerMap>,
@@ -59,6 +54,8 @@ export class FetchHttpApi<O extends IHttpOpts> {
         checkObjectHasKeys(opts, ["baseUrl", "prefix"]);
         opts.onlyData = !!opts.onlyData;
         opts.useAuthorizationHeader = opts.useAuthorizationHeader ?? true;
+
+        this.tokenRefresher = new TokenRefresher(opts);
     }
 
     public abort(): void {
@@ -114,12 +111,6 @@ export class FetchHttpApi<O extends IHttpOpts> {
     }
 
     /**
-     * Promise used to block authenticated requests during a token refresh to avoid repeated expected errors.
-     * @private
-     */
-    private tokenRefreshPromise?: Promise<unknown>;
-
-    /**
      * Perform an authorised request to the homeserver.
      * @param method - The HTTP method e.g. "GET".
      * @param path - The HTTP path <b>after</b> the supplied prefix e.g.
@@ -146,37 +137,49 @@ export class FetchHttpApi<O extends IHttpOpts> {
      * @returns Rejects with an error if a problem occurred.
      * This includes network problems and Matrix-specific error JSON.
      */
-    public async authedRequest<T>(
+    public authedRequest<T>(
         method: Method,
         path: string,
-        queryParams?: QueryDict,
+        queryParams: QueryDict = {},
         body?: Body,
-        paramOpts: IRequestOpts & { doNotAttemptTokenRefresh?: boolean } = {},
+        paramOpts: IRequestOpts = {},
     ): Promise<ResponseType<T, O>> {
-        if (!queryParams) queryParams = {};
+        return this.doAuthedRequest<T>(1, method, path, queryParams, body, paramOpts);
+    }
 
+    // Wrapper around public method authedRequest to allow for tracking retry attempt counts
+    private async doAuthedRequest<T>(
+        attempt: number,
+        method: Method,
+        path: string,
+        queryParams: QueryDict,
+        body?: Body,
+        paramOpts: IRequestOpts = {},
+    ): Promise<ResponseType<T, O>> {
         // avoid mutating paramOpts so they can be used on retry
-        const opts = { ...paramOpts };
+        const opts = deepCopy(paramOpts);
+        // we have to manually copy the abortSignal over as it is not a plain object
+        opts.abortSignal = paramOpts.abortSignal;
 
-        if (this.opts.accessToken) {
+        // Take a snapshot of the current token state before we start the request so we can reference it if we error
+        const requestSnapshot = await this.tokenRefresher.prepareForRequest();
+        if (requestSnapshot.accessToken) {
             if (this.opts.useAuthorizationHeader) {
                 if (!opts.headers) {
                     opts.headers = {};
                 }
                 if (!opts.headers.Authorization) {
-                    opts.headers.Authorization = "Bearer " + this.opts.accessToken;
+                    opts.headers.Authorization = `Bearer ${requestSnapshot.accessToken}`;
                 }
                 if (queryParams.access_token) {
                     delete queryParams.access_token;
                 }
             } else if (!queryParams.access_token) {
-                queryParams.access_token = this.opts.accessToken;
+                queryParams.access_token = requestSnapshot.accessToken;
             }
         }
 
         try {
-            // Await any ongoing token refresh
-            await this.tokenRefreshPromise;
             const response = await this.request<T>(method, path, queryParams, body, opts);
             return response;
         } catch (error) {
@@ -184,59 +187,24 @@ export class FetchHttpApi<O extends IHttpOpts> {
                 throw error;
             }
 
-            if (error.errcode === "M_UNKNOWN_TOKEN" && !opts.doNotAttemptTokenRefresh) {
-                const tokenRefreshPromise = this.tryRefreshToken();
-                this.tokenRefreshPromise = Promise.allSettled([tokenRefreshPromise]);
-                const outcome = await tokenRefreshPromise;
-
+            if (error.errcode === "M_UNKNOWN_TOKEN") {
+                const outcome = await this.tokenRefresher.handleUnknownToken(requestSnapshot, attempt);
                 if (outcome === TokenRefreshOutcome.Success) {
                     // if we got a new token retry the request
-                    return this.authedRequest(method, path, queryParams, body, {
-                        ...paramOpts,
-                        doNotAttemptTokenRefresh: true,
-                    });
+                    return this.doAuthedRequest(attempt + 1, method, path, queryParams, body, paramOpts);
                 }
                 if (outcome === TokenRefreshOutcome.Failure) {
                     throw new TokenRefreshError(error);
                 }
-                // Fall through to SessionLoggedOut handler below
-            }
 
-            // otherwise continue with error handling
-            if (error.errcode == "M_UNKNOWN_TOKEN" && !opts?.inhibitLogoutEmit) {
-                this.eventEmitter.emit(HttpApiEvent.SessionLoggedOut, error);
+                if (!opts?.inhibitLogoutEmit) {
+                    this.eventEmitter.emit(HttpApiEvent.SessionLoggedOut, error);
+                }
             } else if (error.errcode == "M_CONSENT_NOT_GIVEN") {
                 this.eventEmitter.emit(HttpApiEvent.NoConsent, error.message, error.data.consent_uri);
             }
 
             throw error;
-        }
-    }
-
-    /**
-     * Attempt to refresh access tokens.
-     * On success, sets new access and refresh tokens in opts.
-     * @returns Promise that resolves to a boolean - true when token was refreshed successfully
-     */
-    @singleAsyncExecution
-    private async tryRefreshToken(): Promise<TokenRefreshOutcome> {
-        if (!this.opts.refreshToken || !this.opts.tokenRefreshFunction) {
-            return TokenRefreshOutcome.Logout;
-        }
-
-        try {
-            const { accessToken, refreshToken } = await this.opts.tokenRefreshFunction(this.opts.refreshToken);
-            this.opts.accessToken = accessToken;
-            this.opts.refreshToken = refreshToken;
-            // successfully got new tokens
-            return TokenRefreshOutcome.Success;
-        } catch (error) {
-            this.opts.logger?.warn("Failed to refresh token", error);
-            // If we get a TokenError or MatrixError, we should log out, otherwise assume transient
-            if (error instanceof TokenRefreshLogoutError || error instanceof MatrixError) {
-                return TokenRefreshOutcome.Logout;
-            }
-            return TokenRefreshOutcome.Failure;
         }
     }
 
@@ -412,9 +380,12 @@ export class FetchHttpApi<O extends IHttpOpts> {
             ? baseUrlWithFallback.slice(0, -1)
             : baseUrlWithFallback;
         const url = new URL(baseUrlWithoutTrailingSlash + (prefix ?? this.opts.prefix) + path);
-        if (queryParams) {
-            encodeParams(queryParams, url.searchParams);
+        // If there are any params, encode and append them to the URL.
+        if (this.opts.extraParams || queryParams) {
+            const mergedParams = { ...this.opts.extraParams, ...queryParams };
+            encodeParams(mergedParams, url.searchParams);
         }
+
         return url;
     }
 }

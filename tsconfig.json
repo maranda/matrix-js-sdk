@@ -9,7 +9,10 @@
         "noEmit": true,
         "declaration": true,
         "strict": true,
-        "allowImportingTsExtensions": true
+        "allowImportingTsExtensions": true,
+        "lib": ["es2024"],
+        "baseUrl": ".",
+        "typeRoots": ["./node_modules/@types"]
     },
     "include": ["./src/**/*.ts", "./spec/**/*.ts"]
 }

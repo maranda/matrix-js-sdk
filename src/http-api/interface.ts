@@ -16,6 +16,7 @@ limitations under the License.
 
 import { type MatrixError } from "./errors.ts";
 import { type Logger } from "../logger.ts";
+import { type QueryDict } from "../utils.ts";
 
 export type Body = Record<string, any> | BodyInit;
 
@@ -24,9 +25,20 @@ export type Body = Record<string, any> | BodyInit;
  * Unencrypted access and (optional) refresh token
  */
 export type AccessTokens = {
+    /**
+     * The new access token to use for authenticated requests
+     */
     accessToken: string;
+    /**
+     * The new refresh token to use for refreshing tokens, optional
+     */
     refreshToken?: string;
+    /**
+     * Approximate date when the access token will expire, optional
+     */
+    expiry?: Date;
 };
+
 /**
  * @experimental
  * Function that performs token refresh using the given refreshToken.
@@ -41,7 +53,7 @@ export interface IHttpOpts {
     baseUrl: string;
     idBaseUrl?: string;
     prefix: string;
-    extraParams?: Record<string, string>;
+    extraParams?: QueryDict;
 
     accessToken?: string;
     /**

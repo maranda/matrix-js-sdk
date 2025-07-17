@@ -52,7 +52,7 @@ import {
     type GroupCallEventHandlerEventHandlerMap,
 } from "./webrtc/groupCallEventHandler.ts";
 import * as utils from "./utils.ts";
-import { deepCompare, defer, noUnsafeEventProps, type QueryDict, replaceParam, safeSet, sleep } from "./utils.ts";
+import { deepCompare, noUnsafeEventProps, type QueryDict, replaceParam, safeSet, sleep } from "./utils.ts";
 import { Direction, EventTimeline } from "./models/event-timeline.ts";
 import { type IActionsObject, PushProcessor } from "./pushprocessor.ts";
 import { AutoDiscovery, type AutoDiscoveryAction } from "./autodiscovery.ts";
@@ -87,7 +87,12 @@ import { type IIdentityServerProvider } from "./@types/IIdentityServerProvider.t
 import { type MatrixScheduler } from "./scheduler.ts";
 import { type BeaconEvent, type BeaconEventHandlerMap } from "./models/beacon.ts";
 import { type AuthDict } from "./interactive-auth.ts";
-import { type IMinimalEvent, type IRoomEvent, type IStateEvent } from "./sync-accumulator.ts";
+import {
+    type IMinimalEvent,
+    type IRoomEvent,
+    type IStateEvent,
+    type ReceivedToDeviceMessage,
+} from "./sync-accumulator.ts";
 import type { EventTimelineSet } from "./models/event-timeline-set.ts";
 import * as ContentHelpers from "./content-helpers.ts";
 import {
@@ -207,7 +212,7 @@ import {
 import { M_BEACON_INFO, type MBeaconInfoEventContent } from "./@types/beacon.ts";
 import { NamespacedValue, UnstableValue } from "./NamespacedValue.ts";
 import { ToDeviceMessageQueue } from "./ToDeviceMessageQueue.ts";
-import { type ToDeviceBatch } from "./models/ToDeviceMessage.ts";
+import { type ToDeviceBatch, type ToDevicePayload } from "./models/ToDeviceMessage.ts";
 import { IgnoredInvites } from "./models/invites-ignorer.ts";
 import { type UIARequest } from "./@types/uia.ts";
 import { type LocalNotificationSettings } from "./@types/local_notifications.ts";
@@ -360,7 +365,7 @@ export interface ICreateClientOpts {
      * to all requests with this client. Useful for application services which require
      * `?user_id=`.
      */
-    queryParams?: Record<string, string>;
+    queryParams?: QueryDict;
 
     /**
      * Encryption key used for encrypting sensitive data (such as e2ee keys) in {@link ICreateClientOpts#cryptoStore}.
@@ -434,13 +439,13 @@ export interface ICreateClientOpts {
 
     /**
      * If true, group calls will not establish media connectivity and only create the signaling events,
-     * so that livekit media can be used in the application layert (js-sdk contains no livekit code).
+     * so that livekit media can be used in the application layer (js-sdk contains no livekit code).
      */
     useLivekitForGroupCalls?: boolean;
 
     /**
      * A logger to associate with this MatrixClient.
-     * Defaults to the built-in global logger.
+     * Defaults to the built-in global logger; see {@link DebugLogger} for an alternative.
      */
     logger?: Logger;
 }
@@ -883,76 +888,6 @@ interface IWhoamiResponse {
 const EVENT_ID_PREFIX = "$";
 
 export enum ClientEvent {
-    Sync = "sync",
-    Event = "event",
-    ToDeviceEvent = "toDeviceEvent",
-    AccountData = "accountData",
-    Room = "Room",
-    DeleteRoom = "deleteRoom",
-    SyncUnexpectedError = "sync.unexpectedError",
-    ClientWellKnown = "WellKnown.client",
-    ReceivedVoipEvent = "received_voip_event",
-    UndecryptableToDeviceEvent = "toDeviceEvent.undecryptable",
-    TurnServers = "turnServers",
-    TurnServersError = "turnServers.error",
-}
-
-type RoomEvents =
-    | RoomEvent.Name
-    | RoomEvent.Redaction
-    | RoomEvent.RedactionCancelled
-    | RoomEvent.Receipt
-    | RoomEvent.Tags
-    | RoomEvent.LocalEchoUpdated
-    | RoomEvent.HistoryImportedWithinTimeline
-    | RoomEvent.AccountData
-    | RoomEvent.MyMembership
-    | RoomEvent.Timeline
-    | RoomEvent.TimelineReset;
-
-type RoomStateEvents =
-    | RoomStateEvent.Events
-    | RoomStateEvent.Members
-    | RoomStateEvent.NewMember
-    | RoomStateEvent.Update
-    | RoomStateEvent.Marker;
-
-type CryptoEvents = (typeof CryptoEvent)[keyof typeof CryptoEvent];
-
-type MatrixEventEvents = MatrixEventEvent.Decrypted | MatrixEventEvent.Replaced | MatrixEventEvent.VisibilityChange;
-
-type RoomMemberEvents =
-    | RoomMemberEvent.Name
-    | RoomMemberEvent.Typing
-    | RoomMemberEvent.PowerLevel
-    | RoomMemberEvent.Membership;
-
-type UserEvents =
-    | UserEvent.AvatarUrl
-    | UserEvent.DisplayName
-    | UserEvent.Presence
-    | UserEvent.CurrentlyActive
-    | UserEvent.LastPresenceTs;
-
-export type EmittedEvents =
-    | ClientEvent
-    | RoomEvents
-    | RoomStateEvents
-    | CryptoEvents
-    | MatrixEventEvents
-    | RoomMemberEvents
-    | UserEvents
-    | CallEvent // re-emitted by call.ts using Object.values
-    | CallEventHandlerEvent.Incoming
-    | GroupCallEventHandlerEvent.Incoming
-    | GroupCallEventHandlerEvent.Outgoing
-    | GroupCallEventHandlerEvent.Ended
-    | GroupCallEventHandlerEvent.Participants
-    | HttpApiEvent.SessionLoggedOut
-    | HttpApiEvent.NoConsent
-    | BeaconEvent;
-
-export type ClientEventHandlerMap = {
     /**
      * Fires whenever the SDK's syncing state is updated. The state can be one of:
      * <ul>
@@ -1035,13 +970,15 @@ export type ClientEventHandlerMap = {
      * trying to sync after stopClient has been called.</li>
      * </ul>
      *
-     * @param state - An enum representing the syncing state. One of "PREPARED",
+     * The payloads consits of the following 3 parameters:
+     *
+     * - state - An enum representing the syncing state. One of "PREPARED",
      * "SYNCING", "ERROR", "STOPPED".
      *
-     * @param prevState - An enum representing the previous syncing state.
+     * - prevState - An enum representing the previous syncing state.
      * One of "PREPARED", "SYNCING", "ERROR", "STOPPED" <b>or null</b>.
      *
-     * @param data - Data about this transition.
+     * - data - Data about this transition.
      *
      * @example
      * ```
@@ -1061,14 +998,14 @@ export type ClientEventHandlerMap = {
      * });
      * ```
      */
-    [ClientEvent.Sync]: (state: SyncState, prevState: SyncState | null, data?: ISyncStateData) => void;
+    Sync = "sync",
     /**
      * Fires whenever the SDK receives a new event.
      * <p>
      * This is only fired for live events received via /sync - it is not fired for
      * events received over context, search, or pagination APIs.
      *
-     * @param event - The matrix event which caused this event to fire.
+     * The payload is the matrix event which caused this event to fire.
      * @example
      * ```
      * matrixClient.on("event", function(event){
@@ -1076,10 +1013,10 @@ export type ClientEventHandlerMap = {
      * });
      * ```
      */
-    [ClientEvent.Event]: (event: MatrixEvent) => void;
-    /**
+    Event = "event",
+    /** @deprecated Use {@link ReceivedToDeviceMessage}.
      * Fires whenever the SDK receives a new to-device event.
-     * @param event - The matrix event which caused this event to fire.
+     * The payload is the matrix event ({@link MatrixEvent}) which caused this event to fire.
      * @example
      * ```
      * matrixClient.on("toDeviceEvent", function(event){
@@ -1087,8 +1024,69 @@ export type ClientEventHandlerMap = {
      * });
      * ```
      */
-    [ClientEvent.ToDeviceEvent]: (event: MatrixEvent) => void;
+    ToDeviceEvent = "toDeviceEvent",
     /**
+     * Fires whenever the SDK receives a new (potentially decrypted) to-device message.
+     * The payload is the to-device message and the encryption info for that message ({@link ReceivedToDeviceMessage}).
+     * @example
+     * ```
+     * matrixClient.on("receivedToDeviceMessage", function(payload){
+     *   const { message, encryptionInfo } = payload;
+     *   var claimed_sender = encryptionInfo ? encryptionInfo.sender : message.sender;
+     *   var isVerified = encryptionInfo ? encryptionInfo.verified : false;
+     *   var type = message.type;
+     * });
+     */
+    ReceivedToDeviceMessage = "receivedToDeviceMessage",
+    /**
+     * Fires whenever new user-scoped account_data is added.
+     * The payload is a pair of event ({@link MatrixEvent}) describing the account_data just added, and the previous event, if known:
+     *  - event: The event describing the account_data just added
+     *  - oldEvent: The previous account data, if known.
+     * @example
+     * ```
+     * matrixClient.on("accountData", function(event, oldEvent){
+     *   myAccountData[event.type] = event.content;
+     * });
+     * ```
+     */
+    AccountData = "accountData",
+    /**
+     * Fires whenever a new Room is added. This will fire when you are invited to a
+     * room, as well as when you join a room. <strong>This event is experimental and
+     * may change.</strong>
+     *
+     * The payload is the newly created room, fully populated.
+     * @example
+     * ```
+     * matrixClient.on("Room", function(room){
+     *   var roomId = room.roomId;
+     * });
+     * ```
+     */
+    Room = "Room",
+    /**
+     * Fires whenever a Room is removed. This will fire when you forget a room.
+     * <strong>This event is experimental and may change.</strong>
+     * The payload is the roomId of the deleted room.
+     * @example
+     * ```
+     * matrixClient.on("deleteRoom", function(roomId){
+     *   // update UI from getRooms()
+     * });
+     * ```
+     */
+    DeleteRoom = "deleteRoom",
+    SyncUnexpectedError = "sync.unexpectedError",
+    /**
+     * Fires when the client .well-known info is fetched.
+     * The payload is the JSON object (see {@link IClientWellKnown}) returned by the server
+     */
+    ClientWellKnown = "WellKnown.client",
+    ReceivedVoipEvent = "received_voip_event",
+    /**
+     * @deprecated This event is not supported anymore.
+     *
      * Fires if a to-device event is received that cannot be decrypted.
      * Encrypted to-device events will (generally) use plain Olm encryption,
      * in which case decryption failures are fatal: the event will never be
@@ -1097,52 +1095,78 @@ export type ClientEventHandlerMap = {
      *
      * An undecryptable to-device event is therefore likely to indicate problems.
      *
-     * @param event - The undecyptable to-device event
+     * The payload is the undecyptable to-device event
      */
+    UndecryptableToDeviceEvent = "toDeviceEvent.undecryptable",
+    TurnServers = "turnServers",
+    TurnServersError = "turnServers.error",
+}
+
+type RoomEvents =
+    | RoomEvent.Name
+    | RoomEvent.Redaction
+    | RoomEvent.RedactionCancelled
+    | RoomEvent.Receipt
+    | RoomEvent.Tags
+    | RoomEvent.LocalEchoUpdated
+    | RoomEvent.HistoryImportedWithinTimeline
+    | RoomEvent.AccountData
+    | RoomEvent.MyMembership
+    | RoomEvent.Timeline
+    | RoomEvent.TimelineReset;
+
+type RoomStateEvents =
+    | RoomStateEvent.Events
+    | RoomStateEvent.Members
+    | RoomStateEvent.NewMember
+    | RoomStateEvent.Update
+    | RoomStateEvent.Marker;
+
+type CryptoEvents = (typeof CryptoEvent)[keyof typeof CryptoEvent];
+
+type MatrixEventEvents = MatrixEventEvent.Decrypted | MatrixEventEvent.Replaced | MatrixEventEvent.VisibilityChange;
+
+type RoomMemberEvents =
+    | RoomMemberEvent.Name
+    | RoomMemberEvent.Typing
+    | RoomMemberEvent.PowerLevel
+    | RoomMemberEvent.Membership;
+
+type UserEvents =
+    | UserEvent.AvatarUrl
+    | UserEvent.DisplayName
+    | UserEvent.Presence
+    | UserEvent.CurrentlyActive
+    | UserEvent.LastPresenceTs;
+
+export type EmittedEvents =
+    | ClientEvent
+    | RoomEvents
+    | RoomStateEvents
+    | CryptoEvents
+    | MatrixEventEvents
+    | RoomMemberEvents
+    | UserEvents
+    | CallEvent // re-emitted by call.ts using Object.values
+    | CallEventHandlerEvent.Incoming
+    | GroupCallEventHandlerEvent.Incoming
+    | GroupCallEventHandlerEvent.Outgoing
+    | GroupCallEventHandlerEvent.Ended
+    | GroupCallEventHandlerEvent.Participants
+    | HttpApiEvent.SessionLoggedOut
+    | HttpApiEvent.NoConsent
+    | BeaconEvent;
+
+export type ClientEventHandlerMap = {
+    [ClientEvent.Sync]: (state: SyncState, prevState: SyncState | null, data?: ISyncStateData) => void;
+    [ClientEvent.Event]: (event: MatrixEvent) => void;
+    [ClientEvent.ToDeviceEvent]: (event: MatrixEvent) => void;
+    [ClientEvent.ReceivedToDeviceMessage]: (payload: ReceivedToDeviceMessage) => void;
     [ClientEvent.UndecryptableToDeviceEvent]: (event: MatrixEvent) => void;
-    /**
-     * Fires whenever new user-scoped account_data is added.
-     * @param event - The event describing the account_data just added
-     * @param event - The previous account data, if known.
-     * @example
-     * ```
-     * matrixClient.on("accountData", function(event, oldEvent){
-     *   myAccountData[event.type] = event.content;
-     * });
-     * ```
-     */
     [ClientEvent.AccountData]: (event: MatrixEvent, lastEvent?: MatrixEvent) => void;
-    /**
-     * Fires whenever a new Room is added. This will fire when you are invited to a
-     * room, as well as when you join a room. <strong>This event is experimental and
-     * may change.</strong>
-     * @param room - The newly created, fully populated room.
-     * @example
-     * ```
-     * matrixClient.on("Room", function(room){
-     *   var roomId = room.roomId;
-     * });
-     * ```
-     */
     [ClientEvent.Room]: (room: Room) => void;
-    /**
-     * Fires whenever a Room is removed. This will fire when you forget a room.
-     * <strong>This event is experimental and may change.</strong>
-     * @param roomId - The deleted room ID.
-     * @example
-     * ```
-     * matrixClient.on("deleteRoom", function(roomId){
-     *   // update UI from getRooms()
-     * });
-     * ```
-     */
     [ClientEvent.DeleteRoom]: (roomId: string) => void;
     [ClientEvent.SyncUnexpectedError]: (error: Error) => void;
-    /**
-     * Fires when the client .well-known info is fetched.
-     *
-     * @param data - The JSON object returned by the server
-     */
     [ClientEvent.ClientWellKnown]: (data: IClientWellKnown) => void;
     [ClientEvent.ReceivedVoipEvent]: (event: MatrixEvent) => void;
     [ClientEvent.TurnServers]: (servers: ITurnServer[]) => void;
@@ -1341,9 +1365,9 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         // NB. We initialise MatrixRTC whether we have call support or not: this is just
         // the underlying session management and doesn't use any actual media capabilities
-        this.matrixRTC = new MatrixRTCSessionManager(this);
+        this.matrixRTC = new MatrixRTCSessionManager(this.logger, this);
 
-        this.serverCapabilitiesService = new ServerCapabilities(this.http);
+        this.serverCapabilitiesService = new ServerCapabilities(this.logger, this.http);
 
         this.on(ClientEvent.Sync, this.fixupRoomNotifications);
 
@@ -1365,7 +1389,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
 
         this.roomNameGenerator = opts.roomNameGenerator;
 
-        this.toDeviceMessageQueue = new ToDeviceMessageQueue(this);
+        this.toDeviceMessageQueue = new ToDeviceMessageQueue(this, this.logger);
 
         // The SDK doesn't really provide a clean way for events to recalculate the push
         // actions for themselves, so we have to kinda help them out when they are encrypted.
@@ -1482,6 +1506,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 }
                 return this.canResetTimelineCallback(roomId);
             },
+            logger: this.logger.getChild("sync"),
         };
     }
 
@@ -1527,9 +1552,14 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     /**
      * Clear any data out of the persistent stores used by the client.
      *
+     * @param args.cryptoDatabasePrefix - The database name to use for indexeddb, defaults to 'matrix-js-sdk'.
      * @returns Promise which resolves when the stores have been cleared.
      */
-    public clearStores(): Promise<void> {
+    public clearStores(
+        args: {
+            cryptoDatabasePrefix?: string;
+        } = {},
+    ): Promise<void> {
         if (this.clientRunning) {
             throw new Error("Cannot clear stores while client is running");
         }
@@ -1552,8 +1582,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
                 return;
             }
             for (const dbname of [
-                `${RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto`,
-                `${RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto-meta`,
+                `${args.cryptoDatabasePrefix ?? RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto`,
+                `${args.cryptoDatabasePrefix ?? RUST_SDK_STORE_PREFIX}::matrix-sdk-crypto-meta`,
             ]) {
                 const prom = new Promise((resolve, reject) => {
                     this.logger.info(`Removing IndexedDB instance ${dbname}`);
@@ -1901,6 +1931,8 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * ensuring that only one `MatrixClient` issue is instantiated at a time.
      *
      * @param args.useIndexedDB - True to use an indexeddb store, false to use an in-memory store. Defaults to 'true'.
+     * @param args.cryptoDatabasePrefix - The database name to use for indexeddb, defaults to 'matrix-js-sdk'.
+     *    Unused if useIndexedDB is 'false'.
      * @param args.storageKey - A key with which to encrypt the indexeddb store. If provided, it must be exactly
      *    32 bytes of data, and must be the same each time the client is initialised for a given device.
      *    If both this and `storagePassword` are unspecified, the store will be unencrypted.
@@ -1914,6 +1946,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     public async initRustCrypto(
         args: {
             useIndexedDB?: boolean;
+            cryptoDatabasePrefix?: string;
             storageKey?: Uint8Array;
             storagePassword?: string;
         } = {},
@@ -1950,7 +1983,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             deviceId: deviceId,
             secretStorage: this.secretStorage,
             cryptoCallbacks: this.cryptoCallbacks,
-            storePrefix: args.useIndexedDB === false ? null : RUST_SDK_STORE_PREFIX,
+            storePrefix: args.useIndexedDB === false ? null : (args.cryptoDatabasePrefix ?? RUST_SDK_STORE_PREFIX),
             storeKey: args.storageKey,
             storePassphrase: args.storagePassword,
 
@@ -2176,7 +2209,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
     ): Promise<EmptyObject> {
         // If the sync loop is not running, fall back to setAccountDataRaw.
         if (!this.clientRunning) {
-            logger.warn(
+            this.logger.warn(
                 "Calling `setAccountData` before the client is started: `getAccountData` may return inconsistent results.",
             );
             return await retryNetworkOperation(5, () => this.setAccountDataRaw(eventType, content));
@@ -2191,7 +2224,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         if (existingData && deepCompare(existingData.event.content, content)) return {};
 
         // Create a promise which will resolve when the update is received
-        const updatedDefer = defer<void>();
+        const updatedResolvers = Promise.withResolvers<void>();
         function accountDataListener(event: MatrixEvent): void {
             // Note that we cannot safely check that the content matches what we expected, because there is a race:
             //   * We set the new content
@@ -2203,13 +2236,13 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             //
             // Anyway, what we *shouldn't* do is get stuck in a loop. I think the best we can do is check that the event
             // type matches.
-            if (event.getType() === eventType) updatedDefer.resolve();
+            if (event.getType() === eventType) updatedResolvers.resolve();
         }
         this.addListener(ClientEvent.AccountData, accountDataListener);
 
         try {
             const result = await retryNetworkOperation(5, () => this.setAccountDataRaw(eventType, content));
-            await updatedDefer.promise;
+            await updatedResolvers.promise;
             return result;
         } finally {
             this.removeListener(ClientEvent.AccountData, accountDataListener);
@@ -2336,10 +2369,6 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      * @returns Rejects: with an error response.
      */
     public async joinRoom(roomIdOrAlias: string, opts: IJoinRoomOpts = {}): Promise<Room> {
-        if (opts.syncRoom === undefined) {
-            opts.syncRoom = true;
-        }
-
         const room = this.getRoom(roomIdOrAlias);
         if (room?.hasMembershipState(this.credentials.userId!, KnownMembership.Join)) return room;
 
@@ -2375,12 +2404,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         if (resolvedRoom?.hasMembershipState(this.credentials.userId!, KnownMembership.Join)) return resolvedRoom;
 
         const syncApi = new SyncApi(this, this.clientOpts, this.buildSyncApiOptions());
-        const syncRoom = syncApi.createRoom(roomId);
-        if (opts.syncRoom) {
-            // v2 will do this for us
-            // return syncApi.syncRoom(room);
-        }
-        return syncRoom;
+        return syncApi.createRoom(roomId);
     }
 
     /**
@@ -5173,24 +5197,24 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
             } else if (!hasDontNotifyRule) {
                 // Remove the existing one before setting the mute push rule
                 // This is a workaround to SYN-590 (Push rule update fails)
-                const deferred = utils.defer();
+                const doneResolvers = Promise.withResolvers<void>();
                 this.deletePushRule(scope, PushRuleKind.RoomSpecific, roomPushRule.rule_id)
                     .then(() => {
                         this.addPushRule(scope, PushRuleKind.RoomSpecific, roomId, {
                             actions: [PushRuleActionName.DontNotify],
                         })
                             .then(() => {
-                                deferred.resolve();
+                                doneResolvers.resolve();
                             })
                             .catch((err) => {
-                                deferred.reject(err);
+                                doneResolvers.reject(err);
                             });
                     })
                     .catch((err) => {
-                        deferred.reject(err);
+                        doneResolvers.reject(err);
                     });
 
-                promise = deferred.promise;
+                promise = doneResolvers.promise;
             }
         }
 
@@ -7295,7 +7319,7 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
      */
     public setPushRules(rules: IPushRules): void {
         // Fix-up defaults, if applicable.
-        this.pushRules = PushProcessor.rewriteDefaultRules(rules, this.getUserId()!);
+        this.pushRules = PushProcessor.rewriteDefaultRules(this.logger, rules, this.getUserId()!);
         // Pre-calculate any necessary caches.
         this.pushProcessor.updateCachedPushRuleKeys(this.pushRules);
     }
@@ -7940,6 +7964,29 @@ export class MatrixClient extends TypedEventEmitter<EmittedEvents, ClientEventHa
         this.logger.debug(`PUT ${path}`, targets);
 
         return this.http.authedRequest(Method.Put, path, undefined, body);
+    }
+
+    /**
+     * This will encrypt the payload for all devices in the list and will queue it.
+     * The type of the sent to-device message will be `m.room.encrypted`.
+     * @param eventType - The type of event to send
+     * @param devices - The list of devices to send the event to.
+     * @param payload - The payload to send. This will be encrypted.
+     * @returns Promise which resolves once queued there is no error feedback when sending fails.
+     */
+    public async encryptAndSendToDevice(
+        eventType: string,
+        devices: { userId: string; deviceId: string }[],
+        payload: ToDevicePayload,
+    ): Promise<void> {
+        if (!this.cryptoBackend) {
+            throw new Error("Cannot encrypt to device event, your client does not support encryption.");
+        }
+        const batch = await this.cryptoBackend.encryptToDeviceMessages(eventType, devices, payload);
+
+        // TODO The batch mechanism removes all possibility to get error feedbacks..
+        // We might want instead to do the API call directly and pass the errors back.
+        await this.queueToDevice(batch);
     }
 
     /**

@@ -5,7 +5,7 @@ import { getMockClientWithEventEmitter } from "../test-utils/client";
 import { StubStore } from "../../src/store/stub";
 import { type IndexedToDeviceBatch } from "../../src/models/ToDeviceMessage";
 import { SyncState } from "../../src/sync";
-import { defer } from "../../src/utils";
+import { logger } from "../../src/logger.ts";
 
 describe("onResumedSync", () => {
     let batch: IndexedToDeviceBatch | null;
@@ -56,11 +56,11 @@ describe("onResumedSync", () => {
             }
         });
 
-        queue = new ToDeviceMessageQueue(mockClient);
+        queue = new ToDeviceMessageQueue(mockClient, logger);
     });
 
     it("resends queue after connectivity restored", async () => {
-        const deferred = defer();
+        const successResolvers = Promise.withResolvers<void>();
 
         onSendToDeviceFailure = () => {
             expect(store.getOldestToDeviceBatch).toHaveBeenCalledTimes(1);
@@ -73,15 +73,15 @@ describe("onResumedSync", () => {
         onSendToDeviceSuccess = () => {
             expect(store.getOldestToDeviceBatch).toHaveBeenCalledTimes(3);
             expect(store.removeToDeviceBatch).toHaveBeenCalled();
-            deferred.resolve();
+            successResolvers.resolve();
         };
 
         queue.start();
-        return deferred.promise;
+        return successResolvers.promise;
     });
 
     it("does not resend queue if client sync still catching up", async () => {
-        const deferred = defer();
+        const successResolvers = Promise.withResolvers<void>();
 
         onSendToDeviceFailure = () => {
             expect(store.getOldestToDeviceBatch).toHaveBeenCalledTimes(1);
@@ -89,15 +89,15 @@ describe("onResumedSync", () => {
 
             resumeSync(SyncState.Catchup, SyncState.Catchup);
             expect(store.getOldestToDeviceBatch).toHaveBeenCalledTimes(1);
-            deferred.resolve();
+            successResolvers.resolve();
         };
 
         queue.start();
-        return deferred.promise;
+        return successResolvers.promise;
     });
 
     it("does not resend queue if connectivity restored after queue stopped", async () => {
-        const deferred = defer();
+        const successResolvers = Promise.withResolvers<void>();
 
         onSendToDeviceFailure = () => {
             expect(store.getOldestToDeviceBatch).toHaveBeenCalledTimes(1);
@@ -107,10 +107,10 @@ describe("onResumedSync", () => {
 
             resumeSync(SyncState.Syncing, SyncState.Catchup);
             expect(store.getOldestToDeviceBatch).toHaveBeenCalledTimes(1);
-            deferred.resolve();
+            successResolvers.resolve();
         };
 
         queue.start();
-        return deferred.promise;
+        return successResolvers.promise;
     });
 });

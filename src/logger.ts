@@ -1,6 +1,6 @@
 /*
 Copyright 2018 André Jaenisch
-Copyright 2019, 2021 The Matrix.org Foundation C.I.C.
+Copyright 2019-2025 The Matrix.org Foundation C.I.C.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -33,6 +33,11 @@ interface LoggerWithLogMethod extends Logger {
 export interface Logger extends BaseLogger {
     /**
      * Create a child logger.
+     *
+     * This child will use the `methodFactory` of the parent, so any log extensions applied to the parent
+     * at the time of calling `getChild` will be applied to the child as well.
+     * It will NOT apply changes to the parent's `methodFactory` after the child was created.
+     * Those changes need to be applied to the child manually.
      *
      * @param namespace - name to add to the current logger to generate the child. Some implementations of `Logger`
      *    use this as a prefix; others use a different mechanism.
@@ -128,14 +133,24 @@ interface PrefixedLogger extends loglevel.Logger, LoggerWithLogMethod {
  *
  * @param prefix Prefix to add to each logged line. If undefined, no prefix will be added.
  */
-function getPrefixedLogger(prefix?: string): LoggerWithLogMethod {
+function getPrefixedLogger(prefix?: string): PrefixedLogger {
     const loggerName = DEFAULT_NAMESPACE + (prefix === undefined ? "" : `-${prefix}`);
     const prefixLogger = loglevel.getLogger(loggerName) as PrefixedLogger;
 
     if (prefixLogger.getChild === undefined) {
         // This is a new loglevel Logger which has not been turned into a PrefixedLogger yet.
         prefixLogger.prefix = prefix;
-        prefixLogger.getChild = (childPrefix): Logger => getPrefixedLogger((prefix ?? "") + childPrefix);
+        prefixLogger.getChild = (childPrefix): Logger => {
+            // create the new child logger
+            const childLogger = getPrefixedLogger((prefix ?? "") + childPrefix);
+            // Assign the methodFactory from the parent logger.
+            // This is useful if we add extensions to the parent logger that modifies
+            // its methodFactory. (An example extension is: storing each log to a rageshake db)
+            childLogger.methodFactory = prefixLogger.methodFactory;
+            // Rebuild the child logger with the new methodFactory.
+            childLogger.rebuild();
+            return childLogger;
+        };
         prefixLogger.setLevel(loglevel.levels.DEBUG, false);
     }
 
@@ -145,8 +160,11 @@ function getPrefixedLogger(prefix?: string): LoggerWithLogMethod {
 /**
  * Drop-in replacement for `console` using {@link https://www.npmjs.com/package/loglevel|loglevel}.
  * Can be tailored down to specific use cases if needed.
+ *
+ * @deprecated avoid the use of this unless you are the constructor of `MatrixClient`: you should be using the logger
+ *    associated with `MatrixClient`.
  */
-export const logger = getPrefixedLogger();
+export const logger = getPrefixedLogger() as LoggerWithLogMethod;
 
 /**
  * A "span" for grouping related log lines together.
@@ -186,5 +204,76 @@ export class LogSpan implements BaseLogger {
 
     public error(...msg: any[]): void {
         this.parent.error(this.name, ...msg);
+    }
+}
+
+/**
+ * A simplification of the `Debugger` type exposed by the `debug` library. We reimplement the bits we need here
+ * to avoid a dependency on `debug`.
+ */
+interface Debugger {
+    (formatter: any, ...args: any[]): void;
+    extend: (namespace: string, delimiter?: string) => Debugger;
+}
+
+/**
+ * A `Logger` instance, suitable for use in {@link ICreateClientOpts.logger}, which will write to the `debug` library.
+ *
+ * @example
+ * ```js
+ *     import debug from "debug";
+ *
+ *     const client = createClient({
+ *         baseUrl: homeserverUrl,
+ *         userId: userId,
+ *         accessToken: "akjgkrgjs",
+ *         deviceId: "xzcvb",
+ *         logger: new DebugLogger(debug(`matrix-js-sdk:${userId}`)),
+ *     });
+ * ```
+ */
+export class DebugLogger implements Logger {
+    public constructor(private debugInstance: Debugger) {}
+
+    public trace(...msg: any[]): void {
+        this.debugWithPrefix("[TRACE]", ...msg);
+    }
+
+    public debug(...msg: any[]): void {
+        this.debugWithPrefix("[DEBUG]", ...msg);
+    }
+
+    public info(...msg: any[]): void {
+        this.debugWithPrefix("[INFO]", ...msg);
+    }
+
+    public warn(...msg: any[]): void {
+        this.debugWithPrefix("[WARN]", ...msg);
+    }
+
+    public error(...msg: any[]): void {
+        this.debugWithPrefix("[ERROR]", ...msg);
+    }
+
+    public getChild(namespace: string): DebugLogger {
+        return new DebugLogger(this.debugInstance.extend(namespace));
+    }
+
+    private debugWithPrefix(prefix: string, ...msg: any[]): void {
+        let formatter: string;
+
+        // Convert the first argument to a string, so that we can safely add a prefix. This is much the same logic that
+        // `debug()` uses.
+        if (msg.length === 0) {
+            formatter = "";
+        } else if (msg[0] instanceof Error) {
+            const err = msg.shift();
+            formatter = err.stack || err.message;
+        } else if (typeof msg[0] == "string") {
+            formatter = msg.shift();
+        } else {
+            formatter = "%O";
+        }
+        this.debugInstance(prefix + " " + formatter, ...msg);
     }
 }

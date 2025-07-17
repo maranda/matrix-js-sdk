@@ -28,7 +28,7 @@ import {
     defaultClientOpts,
     defaultSyncApiOpts,
     type SetPresence,
-    mapToDeviceEvent,
+    processToDeviceMessages,
 } from "./sync.ts";
 import { type MatrixEvent } from "./models/event.ts";
 import {
@@ -37,6 +37,7 @@ import {
     type IStateEvent,
     type IStrippedState,
     type ISyncResponse,
+    type ReceivedToDeviceMessage,
 } from "./sync-accumulator.ts";
 import { MatrixError } from "./http-api/index.ts";
 import {
@@ -150,51 +151,20 @@ class ExtensionToDevice implements Extension<ExtensionToDeviceRequest, Extension
     }
 
     public async onResponse(data: ExtensionToDeviceResponse): Promise<void> {
-        const cancelledKeyVerificationTxns: string[] = [];
-        let events = data["events"] || [];
-        if (events.length > 0 && this.cryptoCallbacks) {
-            events = await this.cryptoCallbacks.preprocessToDeviceMessages(events);
+        const events = data["events"] || [];
+        let receivedToDeviceMessages: ReceivedToDeviceMessage[];
+        if (this.cryptoCallbacks) {
+            receivedToDeviceMessages = await this.cryptoCallbacks.preprocessToDeviceMessages(events);
+        } else {
+            receivedToDeviceMessages = events.map((rawEvent) =>
+                // Crypto is not enabled, so we just return the events.
+                ({
+                    message: rawEvent,
+                    encryptionInfo: null,
+                }),
+            );
         }
-        events
-            .map(mapToDeviceEvent)
-            .map((toDeviceEvent) => {
-                // map is a cheap inline forEach
-                // We want to flag m.key.verification.start events as cancelled
-                // if there's an accompanying m.key.verification.cancel event, so
-                // we pull out the transaction IDs from the cancellation events
-                // so we can flag the verification events as cancelled in the loop
-                // below.
-                if (toDeviceEvent.getType() === "m.key.verification.cancel") {
-                    const txnId: string | undefined = toDeviceEvent.getContent()["transaction_id"];
-                    if (txnId) {
-                        cancelledKeyVerificationTxns.push(txnId);
-                    }
-                }
-
-                // as mentioned above, .map is a cheap inline forEach, so return
-                // the unmodified event.
-                return toDeviceEvent;
-            })
-            .forEach((toDeviceEvent) => {
-                const content = toDeviceEvent.getContent();
-                if (toDeviceEvent.getType() == "m.room.message" && content.msgtype == "m.bad.encrypted") {
-                    // the mapper already logged a warning.
-                    logger.log("Ignoring undecryptable to-device event from " + toDeviceEvent.getSender());
-                    return;
-                }
-
-                if (
-                    toDeviceEvent.getType() === "m.key.verification.start" ||
-                    toDeviceEvent.getType() === "m.key.verification.request"
-                ) {
-                    const txnId = content["transaction_id"];
-                    if (cancelledKeyVerificationTxns.includes(txnId)) {
-                        toDeviceEvent.flagCancelled();
-                    }
-                }
-
-                this.client.emit(ClientEvent.ToDeviceEvent, toDeviceEvent);
-            });
+        processToDeviceMessages(receivedToDeviceMessages, this.client);
 
         this.nextBatch = data.next_batch;
     }
@@ -356,8 +326,8 @@ export class SlidingSyncSdk {
     public constructor(
         private readonly slidingSync: SlidingSync,
         private readonly client: MatrixClient,
-        opts?: IStoredClientOpts,
-        syncOpts?: SyncApiOptions,
+        opts: IStoredClientOpts | undefined,
+        syncOpts: SyncApiOptions,
     ) {
         this.opts = defaultClientOpts(opts);
         this.syncOpts = defaultSyncApiOpts(syncOpts);
@@ -386,7 +356,11 @@ export class SlidingSyncSdk {
         let room = this.client.store.getRoom(roomId);
         if (!room) {
             if (!roomData.initial) {
-                logger.debug("initial flag not set but no stored room exists for room ", roomId, roomData);
+                this.syncOpts.logger.debug(
+                    "initial flag not set but no stored room exists for room ",
+                    roomId,
+                    roomData,
+                );
                 return;
             }
             room = _createAndReEmitRoom(this.client, roomId, this.opts);
@@ -396,7 +370,7 @@ export class SlidingSyncSdk {
 
     private onLifecycle(state: SlidingSyncState, resp: MSC3575SlidingSyncResponse | null, err?: Error): void {
         if (err) {
-            logger.debug("onLifecycle", state, err);
+            this.syncOpts.logger.debug("onLifecycle", state, err);
         }
         switch (state) {
             case SlidingSyncState.Complete:
@@ -437,7 +411,9 @@ export class SlidingSyncSdk {
                     }
                 } else {
                     this.failCount = 0;
-                    logger.log(`SlidingSyncState.RequestFinished with ${Object.keys(resp?.rooms || []).length} rooms`);
+                    this.syncOpts.logger.debug(
+                        `SlidingSyncState.RequestFinished with ${Object.keys(resp?.rooms || []).length} rooms`,
+                    );
                 }
                 break;
         }
@@ -556,7 +532,7 @@ export class SlidingSyncSdk {
     private shouldAbortSync(error: MatrixError): boolean {
         if (error.errcode === "M_UNKNOWN_TOKEN") {
             // The logout already happened, we just need to stop.
-            logger.warn("Token no longer valid - assuming logout");
+            this.syncOpts.logger.warn("Token no longer valid - assuming logout");
             this.stop();
             this.updateSyncState(SyncState.Error, { error });
             return true;
@@ -684,7 +660,7 @@ export class SlidingSyncSdk {
             for (let i = timelineEvents.length - 1; i >= 0; i--) {
                 const eventId = timelineEvents[i].getId();
                 if (room.getTimelineForEvent(eventId)) {
-                    logger.debug("Already have event " + eventId + " in limited " +
+                    this.syncOpts.logger.debug("Already have event " + eventId + " in limited " +
                         "sync - not resetting");
                     limited = false;
 
@@ -893,19 +869,19 @@ export class SlidingSyncSdk {
      * Main entry point. Blocks until stop() is called.
      */
     public async sync(): Promise<void> {
-        logger.debug("Sliding sync init loop");
+        this.syncOpts.logger.debug("Sliding sync init loop");
 
         //   1) We need to get push rules so we can check if events should bing as we get
         //      them from /sync.
         while (!this.client.isGuest()) {
             try {
-                logger.debug("Getting push rules...");
+                this.syncOpts.logger.debug("Getting push rules...");
                 const result = await this.client.getPushRules();
-                logger.debug("Got push rules");
+                this.syncOpts.logger.debug("Got push rules");
                 this.client.pushRules = result;
                 break;
             } catch (err) {
-                logger.error("Getting push rules failed", err);
+                this.syncOpts.logger.error("Getting push rules failed", err);
                 if (this.shouldAbortSync(<MatrixError>err)) {
                     return;
                 }
@@ -920,7 +896,7 @@ export class SlidingSyncSdk {
      * Stops the sync object from syncing.
      */
     public stop(): void {
-        logger.debug("SyncApi.stop");
+        this.syncOpts.logger.debug("SyncApi.stop");
         this.slidingSync.stop();
     }
 

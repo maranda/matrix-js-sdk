@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+import debug from "debug";
 import * as RustSdkCryptoJs from "@matrix-org/matrix-sdk-crypto-wasm";
 import {
     BaseMigrationData,
@@ -31,6 +32,7 @@ import { RustCrypto } from "../../../src/rust-crypto/rust-crypto";
 import { initRustCrypto } from "../../../src/rust-crypto";
 import {
     type AccountDataEvents,
+    DebugLogger,
     type Device,
     DeviceVerification,
     type EmptyObject,
@@ -68,8 +70,6 @@ import {
 import * as testData from "../../test-utils/test-data";
 import { E2EKeyReceiver } from "../../test-utils/E2EKeyReceiver";
 import { E2EKeyResponder } from "../../test-utils/E2EKeyResponder";
-import { defer } from "../../../src/utils";
-import { logger } from "../../../src/logger";
 import { OutgoingRequestsManager } from "../../../src/rust-crypto/OutgoingRequestsManager";
 import { ClientEvent, type ClientEventHandlerMap } from "../../../src/client";
 import { type Curve25519AuthData } from "../../../src/crypto-api/keybackup";
@@ -118,6 +118,7 @@ describe("initRustCrypto", () => {
         const testOlmMachine = makeTestOlmMachine();
         jest.spyOn(OlmMachine, "initFromStore").mockResolvedValue(testOlmMachine);
 
+        const logger = new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto"));
         await initRustCrypto({
             logger,
             http: {} as MatrixClient["http"],
@@ -141,6 +142,7 @@ describe("initRustCrypto", () => {
         jest.spyOn(OlmMachine, "initFromStore").mockResolvedValue(testOlmMachine);
 
         const storeKey = new Uint8Array(32);
+        const logger = new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto"));
         await initRustCrypto({
             logger,
             http: {} as MatrixClient["http"],
@@ -163,6 +165,7 @@ describe("initRustCrypto", () => {
         const testOlmMachine = makeTestOlmMachine();
         jest.spyOn(OlmMachine, "initFromStore").mockResolvedValue(testOlmMachine);
 
+        const logger = new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto"));
         await initRustCrypto({
             logger,
             http: {} as MatrixClient["http"],
@@ -187,7 +190,7 @@ describe("initRustCrypto", () => {
         jest.spyOn(OlmMachine, "initFromStore").mockResolvedValue(testOlmMachine);
 
         await initRustCrypto({
-            logger,
+            logger: new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto")),
             http: {} as MatrixClient["http"],
             userId: TEST_USER,
             deviceId: TEST_DEVICE_ID,
@@ -252,9 +255,10 @@ describe("initRustCrypto", () => {
             jest.spyOn(RustSdkCryptoJs.BackupDecryptionKey, "fromBase64").mockReturnValue(mockBackupDecryptionKey);
 
             function legacyMigrationProgressListener(progress: number, total: number): void {
-                logger.log(`migrated ${progress} of ${total}`);
+                // console.log(`migrated ${progress} of ${total}`);
             }
 
+            const logger = new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto"));
             await initRustCrypto({
                 logger,
                 http: makeMatrixHttpApi(),
@@ -359,11 +363,11 @@ describe("initRustCrypto", () => {
             fetchMock.get("path:/_matrix/client/v3/room_keys/version", 404);
 
             function legacyMigrationProgressListener(progress: number, total: number): void {
-                logger.log(`migrated ${progress} of ${total}`);
+                // console.log(`migrated ${progress} of ${total}`);
             }
 
             await initRustCrypto({
-                logger,
+                logger: new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto")),
                 http: makeMatrixHttpApi(),
                 userId: TEST_USER,
                 deviceId: TEST_DEVICE_ID,
@@ -401,6 +405,7 @@ describe("initRustCrypto", () => {
             );
 
             const PICKLE_KEY = "pickle1234";
+            const logger = new DebugLogger(debug("matrix-js-sdk:test:initRustCrypto"));
             await initRustCrypto({
                 logger,
                 http: makeMatrixHttpApi(),
@@ -514,11 +519,8 @@ describe("RustCrypto", () => {
             expect(Array.isArray(keys)).toBeTruthy();
             expect(keys.length).toBe(someRoomKeys.length);
 
-            const aSession = someRoomKeys[0];
-
-            const exportedKey = keys.find((k) => k.session_id == aSession.session_id);
-
-            expect(aSession).toStrictEqual(exportedKey);
+            const exportedKey = keys.find((k) => k.session_id == someRoomKeys[0].session_id);
+            expect(exportedKey).toMatchSnapshot();
         });
 
         it("should import and export keys as JSON", async () => {
@@ -539,11 +541,8 @@ describe("RustCrypto", () => {
             expect(Array.isArray(keys)).toBeTruthy();
             expect(keys.length).toBe(someRoomKeys.length);
 
-            const aSession = someRoomKeys[0];
-
-            const exportedKey = keys.find((k) => k.session_id == aSession.session_id);
-
-            expect(aSession).toStrictEqual(exportedKey);
+            const exportedKey = keys.find((k) => k.session_id == someRoomKeys[0].session_id);
+            expect(exportedKey).toMatchSnapshot();
         });
     });
 
@@ -558,11 +557,11 @@ describe("RustCrypto", () => {
             const inputs: IToDeviceEvent[] = [
                 { content: { key: "value" }, type: "org.matrix.test", sender: "@alice:example.com" },
             ];
-            const res = await rustCrypto.preprocessToDeviceMessages(inputs);
+            const res = (await rustCrypto.preprocessToDeviceMessages(inputs)).map((p) => p.message);
             expect(res).toEqual(inputs);
         });
 
-        it("should pass through bad encrypted messages", async () => {
+        it("should fail to process bad encrypted messages", async () => {
             const olmMachine: OlmMachine = rustCrypto["olmMachine"];
             const keys = olmMachine.identityKeys;
             const inputs: IToDeviceEvent[] = [
@@ -583,7 +582,7 @@ describe("RustCrypto", () => {
             ];
 
             const res = await rustCrypto.preprocessToDeviceMessages(inputs);
-            expect(res).toEqual(inputs);
+            expect(res.length).toEqual(0);
         });
 
         it("emits VerificationRequestReceived on incoming m.key.verification.request", async () => {
@@ -820,7 +819,7 @@ describe("RustCrypto", () => {
             } as unknown as OlmMachine;
 
             const rustCrypto = new RustCrypto(
-                logger,
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
                 mockOlmMachine,
                 fetchMock as unknown as MatrixHttpApi<any>,
                 TEST_USER,
@@ -905,6 +904,7 @@ describe("RustCrypto", () => {
                 makeOutgoingRequest: jest.fn(),
             } as unknown as Mocked<OutgoingRequestProcessor>;
 
+            const logger = new DebugLogger(debug("matrix-js-sdk:test:RustCrypto"));
             const outgoingRequestsManager = new OutgoingRequestsManager(logger, olmMachine, outgoingRequestProcessor);
 
             rustCrypto = new RustCrypto(
@@ -934,8 +934,8 @@ describe("RustCrypto", () => {
 
         it("should go round the loop again if another sync completes while the first `outgoingRequests` is running", async () => {
             // the first call to `outgoingMessages` will return a promise which blocks for a while
-            const firstOutgoingRequestsDefer = defer<Array<any>>();
-            mocked(olmMachine.outgoingRequests).mockReturnValueOnce(firstOutgoingRequestsDefer.promise);
+            const firstOutgoingRequestsResolvers = Promise.withResolvers<Array<any>>();
+            mocked(olmMachine.outgoingRequests).mockReturnValueOnce(firstOutgoingRequestsResolvers.promise);
 
             // the second will return a KeysQueryRequest.
             const testReq = new KeysQueryRequest("1234", "{}");
@@ -952,7 +952,7 @@ describe("RustCrypto", () => {
 
             // the first call now completes, *with an empty result*, which would normally cause us to exit the loop, but
             // we should have a second call queued. It should trigger a call to `makeOutgoingRequest`.
-            firstOutgoingRequestsDefer.resolve([]);
+            firstOutgoingRequestsResolvers.resolve([]);
             await awaitCallToMakeOutgoingRequest();
             expect(olmMachine.outgoingRequests).toHaveBeenCalledTimes(2);
         });
@@ -964,7 +964,11 @@ describe("RustCrypto", () => {
 
             const outgoingRequestProcessor = {} as unknown as OutgoingRequestProcessor;
             rustCrypto["outgoingRequestProcessor"] = outgoingRequestProcessor;
-            const outgoingRequestsManager = new OutgoingRequestsManager(logger, olmMachine, outgoingRequestProcessor);
+            const outgoingRequestsManager = new OutgoingRequestsManager(
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
+                olmMachine,
+                outgoingRequestProcessor,
+            );
             rustCrypto["outgoingRequestsManager"] = outgoingRequestsManager;
 
             // The second time we do a /keys/upload, the `device_keys` property
@@ -1022,7 +1026,7 @@ describe("RustCrypto", () => {
                 getRoomEventEncryptionInfo: jest.fn(),
             } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
             rustCrypto = new RustCrypto(
-                logger,
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
                 olmMachine,
                 {} as MatrixClient["http"],
                 TEST_USER,
@@ -1235,7 +1239,7 @@ describe("RustCrypto", () => {
                 getDevice: jest.fn(),
             } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
             rustCrypto = new RustCrypto(
-                logger,
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
                 olmMachine,
                 {} as MatrixClient["http"],
                 TEST_USER,
@@ -1478,7 +1482,7 @@ describe("RustCrypto", () => {
                 getIdentity: jest.fn(),
             } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
             rustCrypto = new RustCrypto(
-                logger,
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
                 olmMachine,
                 {} as MatrixClient["http"],
                 TEST_USER,
@@ -1565,7 +1569,7 @@ describe("RustCrypto", () => {
                 getIdentity: jest.fn(),
             } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
             const rustCrypto = new RustCrypto(
-                logger,
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
                 olmMachine,
                 {} as MatrixClient["http"],
                 TEST_USER,
@@ -1637,7 +1641,7 @@ describe("RustCrypto", () => {
             } as unknown as Mocked<RustSdkCryptoJs.OlmMachine>;
 
             const rustCrypto = new RustCrypto(
-                logger,
+                new DebugLogger(debug("matrix-js-sdk:test:RustCrypto")),
                 olmMachine,
                 makeMatrixHttpApi(),
                 testData.TEST_USER_ID,
@@ -2255,10 +2259,10 @@ describe("RustCrypto", () => {
         let secretStorage: ServerSideSecretStorage;
         beforeEach(() => {
             secretStorage = {
-                setDefaultKeyId: jest.fn(),
+                setDefaultKeyId: jest.fn().mockResolvedValue(undefined),
                 hasKey: jest.fn().mockResolvedValue(false),
                 getKey: jest.fn().mockResolvedValue(null),
-                store: jest.fn(),
+                store: jest.fn().mockResolvedValue(undefined),
                 getDefaultKeyId: jest.fn().mockResolvedValue("defaultKeyId"),
             } as unknown as ServerSideSecretStorage;
 
@@ -2378,7 +2382,7 @@ async function makeTestRustCrypto(
     cryptoCallbacks: CryptoCallbacks = {} as CryptoCallbacks,
 ): Promise<RustCrypto> {
     return await initRustCrypto({
-        logger,
+        logger: new DebugLogger(debug("matrix-js-sdk:test:rust-crypto.spec")),
         http,
         userId,
         deviceId,
