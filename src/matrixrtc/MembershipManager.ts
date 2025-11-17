@@ -13,21 +13,31 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+import { AbortError } from "p-retry";
 
-import { EventType } from "../@types/event.ts";
-import { UpdateDelayedEventAction } from "../@types/requests.ts";
-import { type MatrixClient } from "../client.ts";
-import { UnsupportedDelayedEventsEndpointError } from "../errors.ts";
+import { EventType, RelationType } from "../@types/event.ts";
+import { type ISendEventResponse, type SendDelayedEventResponse } from "../@types/requests.ts";
+import { type EmptyObject } from "../@types/common.ts";
+import type { MatrixClient } from "../client.ts";
 import { ConnectionError, HTTPError, MatrixError } from "../http-api/errors.ts";
 import { type Logger, logger as rootLogger } from "../logger.ts";
 import { type Room } from "../models/room.ts";
-import { type CallMembership, DEFAULT_EXPIRE_DURATION, type SessionMembershipData } from "./CallMembership.ts";
-import { type Focus } from "./focus.ts";
-import { isMyMembership, Status } from "./types.ts";
-import { isLivekitFocusActive } from "./LivekitFocus.ts";
-import { type MembershipConfig } from "./MatrixRTCSession.ts";
+import {
+    type CallMembership,
+    DEFAULT_EXPIRE_DURATION,
+    type RtcMembershipData,
+    type SessionMembershipData,
+} from "./CallMembership.ts";
+import { type Transport, isMyMembership, type RTCCallIntent, Status } from "./types.ts";
+import {
+    type SlotDescription,
+    type MembershipConfig,
+    type SessionConfig,
+    slotDescriptionToId,
+} from "./MatrixRTCSession.ts";
 import { ActionScheduler, type ActionUpdate } from "./MembershipManagerActionScheduler.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
+import { UnsupportedDelayedEventsEndpointError } from "../errors.ts";
 import {
     MembershipManagerEvent,
     type IMembershipManager,
@@ -35,12 +45,11 @@ import {
 } from "./IMembershipManager.ts";
 
 /* MembershipActionTypes:
-                           
 On Join:  ───────────────┐   ┌───────────────(1)───────────┐
                          ▼   ▼                             │
                    ┌────────────────┐                      │
                    │SendDelayedEvent│ ──────(2)───┐        │
-                   └────────────────┘             │        │ 
+                   └────────────────┘             │        │
                            │(3)                   │        │
                            ▼                      │        │
                     ┌─────────────┐               │        │
@@ -51,9 +60,9 @@ On Join:  ───────────────┐   ┌─────�
 ┌────────────┐  │                  │ ┌───────────────────┐ │
 │UpdateExpiry│ (s)                (s)|RestartDelayedEvent│ │
 └────────────┘  │                  │ └───────────────────┘ │
-          │     │                  │      │        │       │       
-          └─────┘                  └──────┘        └───────┘ 
-     
+          │     │                  │      │        │       │
+          └─────┘                  └──────┘        └───────┘
+
 On Leave: ─────────  STOP ALL ABOVE
                            ▼
             ┌────────────────────────────────┐
@@ -77,6 +86,12 @@ On Leave: ─────────  STOP ALL ABOVE
 */
 
 /**
+ * Call membership should always remain sticky for this amount
+ * of time.
+ */
+const MEMBERSHIP_STICKY_DURATION_MS = 60 * 60 * 1000; // 60 minutes
+
+/**
  * The different types of actions the MembershipManager can take.
  * @internal
  */
@@ -85,19 +100,24 @@ export enum MembershipActionType {
     //  -> MembershipActionType.SendJoinEvent if successful
     //  -> DelayedLeaveActionType.SendDelayedEvent on error, retry sending the first delayed event.
     //  -> DelayedLeaveActionType.RestartDelayedEvent on success start updating the delayed event
+
     SendJoinEvent = "SendJoinEvent",
     //  -> MembershipActionType.SendJoinEvent if we run into a rate limit and need to retry
     //  -> MembershipActionType.Update if we successfully send the join event then schedule the expire event update
     //  -> DelayedLeaveActionType.RestartDelayedEvent to recheck the delayed event
+
     RestartDelayedEvent = "RestartDelayedEvent",
     //  -> DelayedLeaveActionType.SendMainDelayedEvent on missing delay id but there is a rtc state event
     //  -> DelayedLeaveActionType.SendDelayedEvent on missing delay id and there is no state event
     //  -> DelayedLeaveActionType.RestartDelayedEvent on success we schedule the next restart
+
     UpdateExpiry = "UpdateExpiry",
     //  -> MembershipActionType.Update if the timeout has passed so the next update is required.
+
     SendScheduledDelayedLeaveEvent = "SendScheduledDelayedLeaveEvent",
-    //  -> MembershipActionType.SendLeaveEvent on failiour (not found) we need to send the leave manually and cannot use the scheduled delayed event
+    //  -> MembershipActionType.SendLeaveEvent on failure (not found) we need to send the leave manually and cannot use the scheduled delayed event
     //  -> DelayedLeaveActionType.SendScheduledDelayedLeaveEvent on error we try again.
+
     SendLeaveEvent = "SendLeaveEvent",
     // -> MembershipActionType.SendLeaveEvent
 }
@@ -123,7 +143,37 @@ export interface MembershipManagerState {
     rateLimitRetries: Map<MembershipActionType, number>;
     /** Retry counter for other errors */
     networkErrorRetries: Map<MembershipActionType, number>;
+    /** The time at which we expect the server to send the delayed leave event. */
+    expectedServerDelayLeaveTs?: number;
+    /** This is used to track if the client expects the scheduled delayed leave event to have
+     * been sent because restarting failed during the available time.
+     * Once we resend the delayed event or successfully restarted it will get unset. */
+    probablyLeft: boolean;
 }
+
+function createInsertActionUpdate(type: MembershipActionType, offset?: number): ActionUpdate {
+    return {
+        insert: [{ ts: Date.now() + (offset ?? 0), type }],
+    };
+}
+
+function createReplaceActionUpdate(type: MembershipActionType, offset?: number): ActionUpdate {
+    return {
+        replace: [{ ts: Date.now() + (offset ?? 0), type }],
+    };
+}
+
+type MembershipManagerClient = Pick<
+    MatrixClient,
+    | "getUserId"
+    | "getDeviceId"
+    | "sendStateEvent"
+    | "_unstable_sendDelayedStateEvent"
+    | "_unstable_updateDelayedEvent"
+    | "_unstable_cancelScheduledDelayedEvent"
+    | "_unstable_restartScheduledDelayedEvent"
+    | "_unstable_sendScheduledDelayedEvent"
+>;
 
 /**
  * This class is responsible for sending all events relating to the own membership of a matrixRTC call.
@@ -143,7 +193,8 @@ export class MembershipManager
     implements IMembershipManager
 {
     private activated = false;
-    private logger: Logger;
+    private readonly logger: Logger;
+    protected callIntent: RTCCallIntent | undefined;
 
     public isActivated(): boolean {
         return this.activated;
@@ -156,18 +207,21 @@ export class MembershipManager
     /**
      * Puts the MembershipManager in a state where it tries to be joined.
      * It will send delayed events and membership events
-     * @param fociPreferred
-     * @param focusActive
+     * @param fociPreferred the list of preferred foci to use in the joined RTC membership event.
+     * If multiSfuFocus is set, this is only needed if this client wants to publish to multiple transports simultaneously.
+     * @param multiSfuFocus the active focus to use in the joined RTC membership event. Setting this implies the
+     * membership manager will operate in a multi-SFU connection mode. If `undefined`, an `oldest_membership`
+     * transport selection will be used instead.
      * @param onError This will be called once the membership manager encounters an unrecoverable error.
      * This should bubble up the the frontend to communicate that the call does not work in the current environment.
      */
-    public join(fociPreferred: Focus[], focusActive?: Focus, onError?: (error: unknown) => void): void {
+    public join(fociPreferred: Transport[], multiSfuFocus?: Transport, onError?: (error: unknown) => void): void {
         if (this.scheduler.running) {
             this.logger.error("MembershipManager is already running. Ignoring join request.");
             return;
         }
         this.fociPreferred = fociPreferred;
-        this.focusActive = focusActive;
+        this.rtcTransport = multiSfuFocus;
         this.leavePromiseResolvers = undefined;
         this.activated = true;
         this.oldStatus = this.status;
@@ -218,10 +272,19 @@ export class MembershipManager
 
     private leavePromiseResolvers?: PromiseWithResolvers<boolean>;
 
-    public async onRTCSessionMemberUpdate(memberships: CallMembership[]): Promise<void> {
+    public onRTCSessionMemberUpdate(memberships: CallMembership[]): Promise<void> {
+        if (!this.isActivated()) {
+            return Promise.resolve();
+        }
         const userId = this.client.getUserId();
         const deviceId = this.client.getDeviceId();
-        if (userId && deviceId && this.isJoined() && !memberships.some((m) => isMyMembership(m, userId, deviceId))) {
+        if (!userId || !deviceId) {
+            this.logger.error("MembershipManager.onRTCSessionMemberUpdate called without user or device id");
+            return Promise.resolve();
+        }
+        this._ownMembership = memberships.find((m) => isMyMembership(m, userId, deviceId));
+
+        if (!this._ownMembership) {
             // If one of these actions are scheduled or are getting inserted in the next iteration, we should already
             // take care of our missing membership.
             const sendingMembershipActions = [
@@ -231,7 +294,7 @@ export class MembershipManager
             this.logger.warn("Missing own membership: force re-join");
             this.state.hasMemberStateEvent = false;
 
-            if (this.scheduler.actions.find((a) => sendingMembershipActions.includes(a.type as MembershipActionType))) {
+            if (this.scheduler.actions.some((a) => sendingMembershipActions.includes(a.type as MembershipActionType))) {
                 this.logger.error(
                     "tried adding another `SendDelayedEvent` actions even though we already have one in the Queue\nActionQueueOnMemberUpdate:",
                     this.scheduler.actions,
@@ -244,23 +307,16 @@ export class MembershipManager
         return Promise.resolve();
     }
 
-    public getActiveFocus(): Focus | undefined {
-        if (this.focusActive) {
-            // A livekit active focus
-            if (isLivekitFocusActive(this.focusActive)) {
-                if (this.focusActive.focus_selection === "oldest_membership") {
-                    const oldestMembership = this.getOldestMembership();
-                    return oldestMembership?.getPreferredFoci()[0];
-                }
-            } else {
-                this.logger.warn("Unknown own ActiveFocus type. This makes it impossible to connect to an SFU.");
-            }
-        } else {
-            // We do not understand the membership format (could be legacy). We default to oldestMembership
-            // Once there are other methods this is a hard error!
-            const oldestMembership = this.getOldestMembership();
-            return oldestMembership?.getPreferredFoci()[0];
+    public async updateCallIntent(callIntent: RTCCallIntent): Promise<void> {
+        if (!this.activated || !this.ownMembership) {
+            throw Error("You cannot update your intent before joining the call");
         }
+        if (this.ownMembership.callIntent === callIntent) {
+            return; // No-op
+        }
+        this.callIntent = callIntent;
+        // Kick off a new membership event as a result.
+        await this.sendJoinEvent();
     }
 
     /**
@@ -268,20 +324,12 @@ export class MembershipManager
      * @param joinConfig
      * @param room
      * @param client
-     * @param getOldestMembership
      */
     public constructor(
-        private joinConfig: MembershipConfig | undefined,
-        private room: Pick<Room, "getLiveTimeline" | "roomId" | "getVersion">,
-        private client: Pick<
-            MatrixClient,
-            | "getUserId"
-            | "getDeviceId"
-            | "sendStateEvent"
-            | "_unstable_sendDelayedStateEvent"
-            | "_unstable_updateDelayedEvent"
-        >,
-        private getOldestMembership: () => CallMembership | undefined,
+        private readonly joinConfig: (SessionConfig & MembershipConfig) | undefined,
+        protected readonly room: Pick<Room, "roomId" | "getVersion">,
+        protected readonly client: MembershipManagerClient,
+        public readonly slotDescription: SlotDescription,
         parentLogger?: Logger,
     ) {
         super();
@@ -290,8 +338,11 @@ export class MembershipManager
         if (userId === null) throw Error("Missing userId in client");
         if (deviceId === null) throw Error("Missing deviceId in client");
         this.deviceId = deviceId;
-        this.stateKey = this.makeMembershipStateKey(userId, deviceId);
+        // this needs to become a uuid so that consecutive join/leaves result in a key rotation.
+        // we keep it as a string for now for backwards compatibility.
+        this.memberId = this.makeMembershipStateKey(userId, deviceId);
         this.state = MembershipManager.defaultState;
+        this.callIntent = joinConfig?.callIntent;
         this.scheduler = new ActionScheduler((type): Promise<ActionUpdate> => {
             if (this.oldStatus) {
                 // we put this at the beginning of the actions scheduler loop handle callback since it is a loop this
@@ -310,6 +361,11 @@ export class MembershipManager
         }, this.logger);
     }
 
+    private _ownMembership?: CallMembership;
+    public get ownMembership(): CallMembership | undefined {
+        return this._ownMembership;
+    }
+
     // scheduler
     private oldStatus?: Status;
     private scheduler: ActionScheduler;
@@ -325,53 +381,49 @@ export class MembershipManager
             rateLimitRetries: new Map(),
             networkErrorRetries: new Map(),
             expireUpdateIterations: 1,
+            probablyLeft: false,
         };
     }
     // Membership Event static parameters:
-    private deviceId: string;
-    private stateKey: string;
-    private fociPreferred?: Focus[];
-    private focusActive?: Focus;
+    protected deviceId: string;
+    protected memberId: string;
+    protected rtcTransport?: Transport;
+    /** @deprecated This will be removed in favor or rtcTransport becoming a list of actively used transports */
+    private fociPreferred?: Transport[];
 
     // Config:
     private delayedLeaveEventDelayMsOverride?: number;
 
     private get networkErrorRetryMs(): number {
-        return this.joinConfig?.networkErrorRetryMs ?? this.joinConfig?.callMemberEventRetryDelayMinimum ?? 3_000;
+        return this.joinConfig?.networkErrorRetryMs ?? 3_000;
     }
     private get membershipEventExpiryMs(): number {
-        return (
-            this.joinConfig?.membershipEventExpiryMs ??
-            this.joinConfig?.membershipExpiryTimeout ??
-            DEFAULT_EXPIRE_DURATION
-        );
+        return this.joinConfig?.membershipEventExpiryMs ?? DEFAULT_EXPIRE_DURATION;
     }
     private get membershipEventExpiryHeadroomMs(): number {
-        return (
-            this.joinConfig?.membershipEventExpiryHeadroomMs ??
-            this.joinConfig?.membershipExpiryTimeoutHeadroom ??
-            5_000
-        );
+        return this.joinConfig?.membershipEventExpiryHeadroomMs ?? 5_000;
     }
     private computeNextExpiryActionTs(iteration: number): number {
-        return this.state.startTime + this.membershipEventExpiryMs * iteration - this.membershipEventExpiryHeadroomMs;
-    }
-    private get delayedLeaveEventDelayMs(): number {
         return (
-            this.delayedLeaveEventDelayMsOverride ??
-            this.joinConfig?.delayedLeaveEventDelayMs ??
-            this.joinConfig?.membershipServerSideExpiryTimeout ??
-            8_000
+            this.state.startTime +
+            Math.min(this.membershipEventExpiryMs, MEMBERSHIP_STICKY_DURATION_MS) * iteration -
+            this.membershipEventExpiryHeadroomMs
         );
     }
+    protected get delayedLeaveEventDelayMs(): number {
+        return this.delayedLeaveEventDelayMsOverride ?? this.joinConfig?.delayedLeaveEventDelayMs ?? 8_000;
+    }
     private get delayedLeaveEventRestartMs(): number {
-        return this.joinConfig?.delayedLeaveEventRestartMs ?? this.joinConfig?.membershipKeepAlivePeriod ?? 5_000;
+        return this.joinConfig?.delayedLeaveEventRestartMs ?? 5_000;
     }
     private get maximumRateLimitRetryCount(): number {
         return this.joinConfig?.maximumRateLimitRetryCount ?? 10;
     }
     private get maximumNetworkErrorRetryCount(): number {
         return this.joinConfig?.maximumNetworkErrorRetryCount ?? 10;
+    }
+    private get delayedLeaveEventRestartLocalTimeoutMs(): number {
+        return this.joinConfig?.delayedLeaveEventRestartLocalTimeoutMs ?? 2000;
     }
 
     // LOOP HANDLER:
@@ -428,23 +480,26 @@ export class MembershipManager
         }
     }
 
+    // an abstraction to switch between sending state or a sticky event
+    protected clientSendDelayedDisconnectMembership: () => Promise<SendDelayedEventResponse> = () =>
+        this.client._unstable_sendDelayedStateEvent(
+            this.room.roomId,
+            { delay: this.delayedLeaveEventDelayMs },
+            EventType.GroupCallMemberPrefix,
+            {},
+            this.memberId,
+        );
+
     // HANDLERS (used in the membershipLoopHandler)
     private async sendOrResendDelayedLeaveEvent(): Promise<ActionUpdate> {
         // We can reach this at the start of a call (where we do not yet have a membership: state.hasMemberStateEvent=false)
         // or during a call if the state event canceled our delayed event or caused by an unexpected error that removed our delayed event.
         // (Another client could have canceled it, the homeserver might have removed/lost it due to a restart, ...)
         // In the `then` and `catch` block we treat both cases differently. "if (this.state.hasMemberStateEvent) {} else {}"
-        return await this.client
-            ._unstable_sendDelayedStateEvent(
-                this.room.roomId,
-                {
-                    delay: this.delayedLeaveEventDelayMs,
-                },
-                EventType.GroupCallMemberPrefix,
-                {}, // leave event
-                this.stateKey,
-            )
+        return await this.clientSendDelayedDisconnectMembership()
             .then((response) => {
+                this.state.expectedServerDelayLeaveTs = Date.now() + this.delayedLeaveEventDelayMs;
+                this.setAndEmitProbablyLeft(false);
                 // On success we reset retries and set delayId.
                 this.resetRateLimitCounter(MembershipActionType.SendDelayedEvent);
                 this.state.delayId = response.delay_id;
@@ -465,7 +520,7 @@ export class MembershipManager
                 if (this.manageMaxDelayExceededSituation(e)) {
                     return createInsertActionUpdate(repeatActionType);
                 }
-                const update = this.actionUpdateFromErrors(e, repeatActionType, "sendDelayedStateEvent");
+                const update = this.actionUpdateFromErrors(e, repeatActionType, "_unstable_sendDelayedStateEvent");
                 if (update) return update;
 
                 if (this.state.hasMemberStateEvent) {
@@ -492,7 +547,7 @@ export class MembershipManager
     private async cancelKnownDelayIdBeforeSendDelayedEvent(delayId: string): Promise<ActionUpdate> {
         // Remove all running updates and restarts
         return await this.client
-            ._unstable_updateDelayedEvent(delayId, UpdateDelayedEventAction.Cancel)
+            ._unstable_cancelScheduledDelayedEvent(delayId)
             .then(() => {
                 this.state.delayId = undefined;
                 this.resetRateLimitCounter(MembershipActionType.SendDelayedEvent);
@@ -500,7 +555,7 @@ export class MembershipManager
             })
             .catch((e) => {
                 const repeatActionType = MembershipActionType.SendDelayedEvent;
-                const update = this.actionUpdateFromErrors(e, repeatActionType, "updateDelayedEvent");
+                const update = this.actionUpdateFromErrors(e, repeatActionType, "cancelScheduledDelayedEvent");
                 if (update) return update;
 
                 if (this.isNotFoundError(e)) {
@@ -524,17 +579,55 @@ export class MembershipManager
             });
     }
 
+    private setAndEmitProbablyLeft(probablyLeft: boolean): void {
+        if (this.state.probablyLeft === probablyLeft) {
+            return;
+        }
+        this.state.probablyLeft = probablyLeft;
+        this.emit(MembershipManagerEvent.ProbablyLeft, this.state.probablyLeft);
+    }
+
     private async restartDelayedEvent(delayId: string): Promise<ActionUpdate> {
-        return await this.client
-            ._unstable_updateDelayedEvent(delayId, UpdateDelayedEventAction.Restart)
+        // Compute the duration until we expect the server to send the delayed leave event.
+        const durationUntilServerDelayedLeave = this.state.expectedServerDelayLeaveTs
+            ? this.state.expectedServerDelayLeaveTs - Date.now()
+            : undefined;
+        const abortPromise = new Promise((_, reject) => {
+            setTimeout(
+                () => {
+                    reject(new AbortError("Restart delayed event timed out before the HS responded"));
+                },
+                // We abort immediately at the time where we expect the server to send the delayed leave event.
+                // At this point we want the catch block to run and set the `probablyLeft` state.
+                //
+                // While we are already in probablyLeft state, we use the unaltered delayedLeaveEventRestartLocalTimeoutMs.
+                durationUntilServerDelayedLeave !== undefined && !this.state.probablyLeft
+                    ? Math.min(this.delayedLeaveEventRestartLocalTimeoutMs, durationUntilServerDelayedLeave)
+                    : this.delayedLeaveEventRestartLocalTimeoutMs,
+            );
+        });
+
+        // The obvious choice here would be to use the `IRequestOpts` to set the timeout. Since this call might be forwarded
+        // to the widget driver this information would get lost. That is why we mimic the AbortError using the race.
+        return await Promise.race([this.client._unstable_restartScheduledDelayedEvent(delayId), abortPromise])
             .then(() => {
+                // Whenever we successfully restart the delayed event we update the `state.expectedServerDelayLeaveTs`
+                // which stores the predicted timestamp at which the server will send the delayed leave event if there wont be any further
+                // successful restart requests.
+                this.state.expectedServerDelayLeaveTs = Date.now() + this.delayedLeaveEventDelayMs;
                 this.resetRateLimitCounter(MembershipActionType.RestartDelayedEvent);
+                this.setAndEmitProbablyLeft(false);
                 return createInsertActionUpdate(
                     MembershipActionType.RestartDelayedEvent,
                     this.delayedLeaveEventRestartMs,
                 );
             })
             .catch((e) => {
+                if (this.state.expectedServerDelayLeaveTs && this.state.expectedServerDelayLeaveTs <= Date.now()) {
+                    // Once we reach this point it's likely that the server is sending the delayed leave event so we emit `probablyLeft = true`.
+                    // It will emit `probablyLeft = false` once we notice about our leave through sync and successfully setup a new state event.
+                    this.setAndEmitProbablyLeft(true);
+                }
                 const repeatActionType = MembershipActionType.RestartDelayedEvent;
                 if (this.isNotFoundError(e)) {
                     this.state.delayId = undefined;
@@ -544,7 +637,7 @@ export class MembershipManager
                 if (this.isUnsupportedDelayedEndpoint(e)) return {};
 
                 // TODO this also needs a test: get rate limit while checking id delayed event is scheduled
-                const update = this.actionUpdateFromErrors(e, repeatActionType, "updateDelayedEvent");
+                const update = this.actionUpdateFromErrors(e, repeatActionType, "restartScheduledDelayedEvent");
                 if (update) return update;
 
                 // In other error cases we have no idea what is happening
@@ -554,7 +647,7 @@ export class MembershipManager
 
     private async sendScheduledDelayedLeaveEventOrFallbackToSendLeaveEvent(delayId: string): Promise<ActionUpdate> {
         return await this.client
-            ._unstable_updateDelayedEvent(delayId, UpdateDelayedEventAction.Send)
+            ._unstable_sendScheduledDelayedEvent(delayId)
             .then(() => {
                 this.state.hasMemberStateEvent = false;
                 this.resetRateLimitCounter(MembershipActionType.SendScheduledDelayedLeaveEvent);
@@ -568,7 +661,7 @@ export class MembershipManager
                     this.state.delayId = undefined;
                     return createInsertActionUpdate(repeatActionType);
                 }
-                const update = this.actionUpdateFromErrors(e, repeatActionType, "updateDelayedEvent");
+                const update = this.actionUpdateFromErrors(e, repeatActionType, "sendScheduledDelayedEvent");
                 if (update) return update;
 
                 // On any other error we fall back to SendLeaveEvent (this includes hard errors from rate limiting)
@@ -580,22 +673,41 @@ export class MembershipManager
             });
     }
 
+    protected clientSendMembership: (
+        myMembership: RtcMembershipData | SessionMembershipData | EmptyObject,
+    ) => Promise<ISendEventResponse> = (myMembership) => {
+        return this.client.sendStateEvent(
+            this.room.roomId,
+            EventType.GroupCallMemberPrefix,
+            myMembership as EmptyObject | SessionMembershipData,
+            this.memberId,
+        );
+    };
+
     private async sendJoinEvent(): Promise<ActionUpdate> {
-        return await this.client
-            .sendStateEvent(
-                this.room.roomId,
-                EventType.GroupCallMemberPrefix,
-                this.makeMyMembership(this.membershipEventExpiryMs),
-                this.stateKey,
-            )
+        return await this.clientSendMembership(this.makeMyMembership(this.membershipEventExpiryMs))
             .then(() => {
+                this.setAndEmitProbablyLeft(false);
                 this.state.startTime = Date.now();
                 // The next update should already use twice the membershipEventExpiryTimeout
                 this.state.expireUpdateIterations = 1;
                 this.state.hasMemberStateEvent = true;
                 this.resetRateLimitCounter(MembershipActionType.SendJoinEvent);
+                // An UpdateExpiry action might be left over from a previous join event.
+                // We can reach sendJoinEvent when the delayed leave event gets send by the HS.
+                // The branch where we might have a leftover UpdateExpiry action is:
+                // RestartDelayedEvent (cannot find it, server removed it)
+                // -> SendDelayedEvent (send new delayed event)
+                // -> SendJoinEvent (here with a still scheduled UpdateExpiry action)
+                const actionsWithoutUpdateExpiry = this.scheduler.actions.filter(
+                    (a) =>
+                        a.type !== MembershipActionType.UpdateExpiry && // A new UpdateExpiry action with an updated will be scheduled,
+                        a.type !== MembershipActionType.SendJoinEvent, // Manually remove the SendJoinEvent action,
+                );
                 return {
-                    insert: [
+                    replace: [
+                        ...actionsWithoutUpdateExpiry,
+                        // To check if the delayed event is still there or got removed by inserting the stateEvent, we need to restart it.
                         { ts: Date.now(), type: MembershipActionType.RestartDelayedEvent },
                         {
                             ts: this.computeNextExpiryActionTs(this.state.expireUpdateIterations),
@@ -613,13 +725,9 @@ export class MembershipManager
 
     private async updateExpiryOnJoinedEvent(): Promise<ActionUpdate> {
         const nextExpireUpdateIteration = this.state.expireUpdateIterations + 1;
-        return await this.client
-            .sendStateEvent(
-                this.room.roomId,
-                EventType.GroupCallMemberPrefix,
-                this.makeMyMembership(this.membershipEventExpiryMs * nextExpireUpdateIteration),
-                this.stateKey,
-            )
+        return await this.clientSendMembership(
+            this.makeMyMembership(this.membershipEventExpiryMs * nextExpireUpdateIteration),
+        )
             .then(() => {
                 // Success, we reset retries and schedule update.
                 this.resetRateLimitCounter(MembershipActionType.UpdateExpiry);
@@ -641,8 +749,7 @@ export class MembershipManager
             });
     }
     private async sendFallbackLeaveEvent(): Promise<ActionUpdate> {
-        return await this.client
-            .sendStateEvent(this.room.roomId, EventType.GroupCallMemberPrefix, {}, this.stateKey)
+        return await this.clientSendMembership({})
             .then(() => {
                 this.resetRateLimitCounter(MembershipActionType.SendLeaveEvent);
                 this.state.hasMemberStateEvent = false;
@@ -657,7 +764,7 @@ export class MembershipManager
 
     // HELPERS
     private makeMembershipStateKey(localUserId: string, localDeviceId: string): string {
-        const stateKey = `${localUserId}_${localDeviceId}`;
+        const stateKey = `${localUserId}_${localDeviceId}_${this.slotDescription.application}${this.slotDescription.id}`;
         if (/^org\.matrix\.msc(3757|3779)\b/.exec(this.room.getVersion())) {
             return stateKey;
         } else {
@@ -668,15 +775,28 @@ export class MembershipManager
     /**
      * Constructs our own membership
      */
-    private makeMyMembership(expires: number): SessionMembershipData {
+    protected makeMyMembership(expires: number): SessionMembershipData | RtcMembershipData {
+        const ownMembership = this.ownMembership;
+
+        const focusObjects =
+            this.rtcTransport === undefined
+                ? {
+                      focus_active: { type: "livekit", focus_selection: "oldest_membership" } as const,
+                      foci_preferred: this.fociPreferred ?? [],
+                  }
+                : {
+                      focus_active: { type: "livekit", focus_selection: "multi_sfu" } as const,
+                      foci_preferred: [this.rtcTransport, ...(this.fociPreferred ?? [])],
+                  };
         return {
-            call_id: "",
-            scope: "m.room",
-            application: "m.call",
-            device_id: this.deviceId,
+            "application": this.slotDescription.application,
+            "call_id": this.slotDescription.id,
+            "scope": "m.room",
+            "device_id": this.deviceId,
             expires,
-            focus_active: { type: "livekit", focus_selection: "oldest_membership" },
-            foci_preferred: this.fociPreferred ?? [],
+            "m.call.intent": this.callIntent,
+            ...focusObjects,
+            ...(ownMembership !== undefined ? { created_ts: ownMembership.createdTs() } : undefined),
         };
     }
 
@@ -712,7 +832,7 @@ export class MembershipManager
         return false;
     }
 
-    private actionUpdateFromErrors(
+    protected actionUpdateFromErrors(
         error: unknown,
         type: MembershipActionType,
         method: string,
@@ -760,7 +880,7 @@ export class MembershipManager
             return createInsertActionUpdate(type, resendDelay);
         }
 
-        throw Error("Exceeded maximum retries for " + type + " attempts (client." + method + "): " + (error as Error));
+        throw Error("Exceeded maximum retries for " + type + " attempts (client." + method + ")", { cause: error });
     }
 
     /**
@@ -775,14 +895,19 @@ export class MembershipManager
     private actionUpdateFromNetworkErrorRetry(error: unknown, type: MembershipActionType): ActionUpdate | undefined {
         // "Is a network error"-boundary
         const retries = this.state.networkErrorRetries.get(type) ?? 0;
+
+        // Strings for error logging
         const retryDurationString = this.networkErrorRetryMs / 1000 + "s";
         const retryCounterString = "(" + retries + "/" + this.maximumNetworkErrorRetryCount + ")";
+
+        // Variables for scheduling the new event
+        let retryDuration = this.networkErrorRetryMs;
+
         if (error instanceof Error && error.name === "AbortError") {
+            // We do not wait for the timeout on local timeouts.
+            retryDuration = 0;
             this.logger.warn(
-                "Network local timeout error while sending event, retrying in " +
-                    retryDurationString +
-                    " " +
-                    retryCounterString,
+                "Network local timeout error while sending event, immediate retry (" + retryCounterString + ")",
                 error,
             );
         } else if (error instanceof Error && error.message.includes("updating delayed event")) {
@@ -825,7 +950,7 @@ export class MembershipManager
         // retry boundary
         if (retries < this.maximumNetworkErrorRetryCount) {
             this.state.networkErrorRetries.set(type, retries + 1);
-            return createInsertActionUpdate(type, this.networkErrorRetryMs);
+            return createInsertActionUpdate(type, retryDuration);
         }
 
         // Failure
@@ -893,16 +1018,74 @@ export class MembershipManager
         this.logger.error("MembershipManager has an unknown state. Actions: ", actions);
         return Status.Unknown;
     }
+
+    public get probablyLeft(): boolean {
+        return this.state.probablyLeft;
+    }
 }
 
-function createInsertActionUpdate(type: MembershipActionType, offset?: number): ActionUpdate {
-    return {
-        insert: [{ ts: Date.now() + (offset ?? 0), type }],
-    };
-}
+/**
+ * Implementation of the Membership manager that uses sticky events
+ * rather than state events.
+ */
+export class StickyEventMembershipManager extends MembershipManager {
+    public constructor(
+        joinConfig: (SessionConfig & MembershipConfig) | undefined,
+        room: Pick<Room, "getLiveTimeline" | "roomId" | "getVersion">,
+        private readonly clientWithSticky: MembershipManagerClient &
+            Pick<MatrixClient, "_unstable_sendStickyEvent" | "_unstable_sendStickyDelayedEvent">,
+        sessionDescription: SlotDescription,
+        parentLogger?: Logger,
+    ) {
+        super(joinConfig, room, clientWithSticky, sessionDescription, parentLogger);
+    }
 
-function createReplaceActionUpdate(type: MembershipActionType, offset?: number): ActionUpdate {
-    return {
-        replace: [{ ts: Date.now() + (offset ?? 0), type }],
+    protected clientSendDelayedDisconnectMembership: () => Promise<SendDelayedEventResponse> = () =>
+        this.clientWithSticky._unstable_sendStickyDelayedEvent(
+            this.room.roomId,
+            MEMBERSHIP_STICKY_DURATION_MS,
+            { delay: this.delayedLeaveEventDelayMs },
+            null,
+            EventType.RTCMembership,
+            { msc4354_sticky_key: this.memberId },
+        );
+
+    protected clientSendMembership: (
+        myMembership: RtcMembershipData | SessionMembershipData | EmptyObject,
+    ) => Promise<ISendEventResponse> = (myMembership) => {
+        return this.clientWithSticky._unstable_sendStickyEvent(
+            this.room.roomId,
+            MEMBERSHIP_STICKY_DURATION_MS,
+            null,
+            EventType.RTCMembership,
+            { ...myMembership, msc4354_sticky_key: this.memberId },
+        );
     };
+
+    private static nameMap = new Map([
+        ["sendStateEvent", "_unstable_sendStickyEvent"],
+        ["sendDelayedStateEvent", "_unstable_sendStickyDelayedEvent"],
+    ]);
+    protected actionUpdateFromErrors(e: unknown, t: MembershipActionType, m: string): ActionUpdate | undefined {
+        return super.actionUpdateFromErrors(e, t, StickyEventMembershipManager.nameMap.get(m) ?? "unknown");
+    }
+
+    protected makeMyMembership(expires: number): SessionMembershipData | RtcMembershipData {
+        const ownMembership = this.ownMembership;
+
+        const relationObject = ownMembership?.eventId
+            ? { "m.relation": { rel_type: RelationType.Reference, event_id: ownMembership?.eventId } }
+            : {};
+        return {
+            application: {
+                type: this.slotDescription.application,
+                ...(this.callIntent ? { "m.call.intent": this.callIntent } : {}),
+            },
+            slot_id: slotDescriptionToId(this.slotDescription),
+            rtc_transports: this.rtcTransport ? [this.rtcTransport] : [],
+            member: { device_id: this.deviceId, user_id: this.client.getUserId()!, id: this.memberId },
+            versions: [],
+            ...relationObject,
+        };
+    }
 }

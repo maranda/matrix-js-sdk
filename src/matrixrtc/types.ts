@@ -13,7 +13,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
-import type { IMentions } from "../matrix.ts";
+import type { IContent, IMentions } from "../matrix.ts";
+import type { RelationEvent } from "../types.ts";
 import type { CallMembership } from "./CallMembership.ts";
 
 export type ParticipantId = string;
@@ -80,15 +81,80 @@ export interface EncryptionKeysToDeviceEventContent {
     // Why is this needed?
     sent_ts?: number;
 }
-
+/**
+ * @deprecated Use `RTCNotificationType` instead.
+ */
 export type CallNotifyType = "ring" | "notify";
-
+/**
+ * @deprecated Use `IRTCNotificationContent` instead.
+ */
 export interface ICallNotifyContent {
     "application": string;
     "m.mentions": IMentions;
     "notify_type": CallNotifyType;
     "call_id": string;
 }
+
+export type RTCNotificationType = "ring" | "notification";
+
+/**
+ * Represents the intention of the call from the perspective of the sending user.
+ * May be any string, although `"audio"` and `"video"` are commonly accepted values.
+ */
+export type RTCCallIntent = "audio" | "video" | string;
+
+/**
+ * This will check if the content has all the expected fields to be a valid IRTCNotificationContent.
+ * It will also cap the lifetime to 90000ms (1.5 min) if a higher value is provided.
+ * @param content
+ * @throws if the content is invalid
+ * @returns a parsed IRTCNotificationContent
+ */
+export function parseCallNotificationContent(content: IContent): IRTCNotificationContent {
+    if (content["m.mentions"] && typeof content["m.mentions"] !== "object") {
+        throw new Error("malformed m.mentions");
+    }
+    if (typeof content["notification_type"] !== "string") {
+        throw new Error("Missing or invalid notification_type");
+    }
+    if (typeof content["sender_ts"] !== "number") {
+        throw new Error("Missing or invalid sender_ts");
+    }
+    if (typeof content["lifetime"] !== "number") {
+        throw new Error("Missing or invalid lifetime");
+    }
+
+    if (content["relation"] && content["relation"]["rel_type"] !== "m.reference") {
+        throw new Error("Invalid relation");
+    }
+    if (content["m.call.intent"] && typeof content["m.call.intent"] !== "string") {
+        throw new Error("Invalid m.call.intent");
+    }
+
+    const cappedLifetime = content["lifetime"] >= 90000 ? 90000 : content["lifetime"];
+    return { ...content, lifetime: cappedLifetime } as IRTCNotificationContent;
+}
+
+/**
+ * Interface for `org.matrix.msc4075.rtc.notification` events.
+ * Don't cast event content to this directly. Use `parseCallNotificationContent` instead to validate the content first.
+ */
+export interface IRTCNotificationContent extends RelationEvent {
+    "m.mentions"?: IMentions;
+    "notification_type": RTCNotificationType;
+    /**
+     * The initial intent of the calling user.
+     */
+    "m.call.intent"?: RTCCallIntent;
+    "sender_ts": number;
+    "lifetime": number;
+}
+
+/**
+ * MSC4310 decline event content for `org.matrix.msc4310.rtc.decline`.
+ * Sent as a standard m.reference relation to an `org.matrix.msc4075.rtc.notification` event.
+ */
+export interface IRTCDeclineContent extends RelationEvent {}
 
 export enum Status {
     Disconnected = "Disconnected",
@@ -126,3 +192,11 @@ export type Statistics = {
 
 export const isMyMembership = (m: CallMembership, userId: string, deviceId: string): boolean =>
     m.sender === userId && m.deviceId === deviceId;
+
+/**
+ *  A RTC transport is a JSON object that describes how to connect to a RTC member.
+ */
+export interface Transport {
+    type: string;
+    [key: string]: unknown;
+}

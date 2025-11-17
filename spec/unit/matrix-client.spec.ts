@@ -801,6 +801,10 @@ describe("MatrixClient", function () {
             await expect(
                 client._unstable_updateDelayedEvent("anyDelayId", UpdateDelayedEventAction.Send),
             ).rejects.toThrow(errorMessage);
+
+            await expect(client._unstable_cancelScheduledDelayedEvent("anyDelayId")).rejects.toThrow(errorMessage);
+            await expect(client._unstable_restartScheduledDelayedEvent("anyDelayId")).rejects.toThrow(errorMessage);
+            await expect(client._unstable_sendScheduledDelayedEvent("anyDelayId")).rejects.toThrow(errorMessage);
         });
 
         it("works with null threadId", async () => {
@@ -1053,34 +1057,193 @@ describe("MatrixClient", function () {
             );
         });
 
-        it("can look up delayed events", async () => {
+        describe("lookups", () => {
+            const statuses = [undefined, "scheduled" as const, "finalised" as const];
+            const delayIds = [undefined, "dxyz", ["d123"], ["d456", "d789"]];
+            const inputs = statuses.flatMap((status) =>
+                delayIds.map((delayId) => [status, delayId] as [(typeof statuses)[0], (typeof delayIds)[0]]),
+            );
+            it.each(inputs)("can look up delayed events (status = %s, delayId = %s)", async (status, delayId) => {
+                httpLookups = [
+                    {
+                        method: "GET",
+                        prefix: unstableMSC4140Prefix,
+                        path: "/delayed_events",
+                        expectQueryParams: {
+                            status,
+                            delay_id: delayId,
+                        },
+                        data: [],
+                    },
+                ];
+
+                await client._unstable_getDelayedEvents(status, delayId);
+            });
+        });
+
+        it.each([UpdateDelayedEventAction.Cancel, UpdateDelayedEventAction.Restart, UpdateDelayedEventAction.Send])(
+            "can %s scheduled delayed events (action in request body)",
+            async (action: UpdateDelayedEventAction) => {
+                const delayId = "id";
+                httpLookups = [
+                    {
+                        method: "POST",
+                        prefix: unstableMSC4140Prefix,
+                        path: `/delayed_events/${encodeURIComponent(delayId)}`,
+                        data: {
+                            action,
+                        },
+                    },
+                ];
+
+                await client._unstable_updateDelayedEvent(delayId, action);
+            },
+        );
+
+        it.each([UpdateDelayedEventAction.Cancel, UpdateDelayedEventAction.Restart, UpdateDelayedEventAction.Send])(
+            "can %s scheduled delayed events (action in request body fallback when auth required)",
+            async (action: UpdateDelayedEventAction) => {
+                const delayId = "id";
+                const baseLookup = {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}`,
+                };
+                httpLookups = [
+                    {
+                        ...baseLookup,
+                        error: {
+                            httpStatus: 401,
+                            errcode: "M_MISSING_TOKEN",
+                        },
+                    },
+                    {
+                        ...baseLookup,
+                        data: {
+                            action,
+                        },
+                    },
+                ];
+
+                await client._unstable_updateDelayedEvent(delayId, action);
+            },
+        );
+
+        it("can cancel scheduled delayed events (action in request path)", async () => {
+            const delayId = "id";
             httpLookups = [
                 {
-                    method: "GET",
+                    method: "POST",
                     prefix: unstableMSC4140Prefix,
-                    path: "/delayed_events",
-                    data: [],
+                    path: `/delayed_events/${encodeURIComponent(delayId)}/cancel`,
                 },
             ];
 
-            await client._unstable_getDelayedEvents();
+            await client._unstable_cancelScheduledDelayedEvent(delayId);
         });
 
-        it("can update delayed events", async () => {
+        it("can restart scheduled delayed events (action in request path)", async () => {
             const delayId = "id";
-            const action = UpdateDelayedEventAction.Restart;
             httpLookups = [
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}/restart`,
+                },
+            ];
+
+            await client._unstable_restartScheduledDelayedEvent(delayId);
+        });
+
+        it("can send scheduled delayed events (action in request path)", async () => {
+            const delayId = "id";
+            httpLookups = [
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}/send`,
+                },
+            ];
+
+            await client._unstable_sendScheduledDelayedEvent(delayId);
+        });
+
+        it("can cancel scheduled delayed events (action in request path fallback when unsupported)", async () => {
+            const delayId = "id";
+            httpLookups = [
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}/cancel`,
+                    error: {
+                        httpStatus: 400,
+                        errcode: "M_UNRECOGNIZED",
+                    },
+                },
                 {
                     method: "POST",
                     prefix: unstableMSC4140Prefix,
                     path: `/delayed_events/${encodeURIComponent(delayId)}`,
                     data: {
-                        action,
+                        action: UpdateDelayedEventAction.Cancel,
                     },
                 },
             ];
 
-            await client._unstable_updateDelayedEvent(delayId, action);
+            await client._unstable_cancelScheduledDelayedEvent(delayId);
+            expect(httpLookups).toHaveLength(0);
+        });
+
+        it("can restart scheduled delayed events (action in request path fallback when unsupported)", async () => {
+            const delayId = "id";
+            httpLookups = [
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}/restart`,
+                    error: {
+                        httpStatus: 400,
+                        errcode: "M_UNRECOGNIZED",
+                    },
+                },
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}`,
+                    data: {
+                        action: UpdateDelayedEventAction.Restart,
+                    },
+                },
+            ];
+
+            await client._unstable_restartScheduledDelayedEvent(delayId);
+            expect(httpLookups).toHaveLength(0);
+        });
+
+        it("can send scheduled delayed events (action in request path fallback when unsupported)", async () => {
+            const delayId = "id";
+            httpLookups = [
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}/send`,
+                    error: {
+                        httpStatus: 400,
+                        errcode: "M_UNRECOGNIZED",
+                    },
+                },
+                {
+                    method: "POST",
+                    prefix: unstableMSC4140Prefix,
+                    path: `/delayed_events/${encodeURIComponent(delayId)}`,
+                    data: {
+                        action: UpdateDelayedEventAction.Send,
+                    },
+                },
+            ];
+
+            await client._unstable_sendScheduledDelayedEvent(delayId);
+            expect(httpLookups).toHaveLength(0);
         });
     });
 
@@ -2366,6 +2529,61 @@ describe("MatrixClient", function () {
         });
     });
 
+    describe("disableVoip option", () => {
+        const baseUrl = "https://alice-server.com";
+        const userId = "@alice:bar";
+        const accessToken = "sometoken";
+
+        beforeEach(() => {
+            mocked(supportsMatrixCall).mockReturnValue(true);
+        });
+
+        afterAll(() => {
+            mocked(supportsMatrixCall).mockReset();
+        });
+
+        it("should not call /voip/turnServer when disableVoip = true", () => {
+            fetchMock.getOnce(`${baseUrl}/_matrix/client/unstable/voip/turnServer`, 200);
+
+            const client = createClient({
+                baseUrl,
+                accessToken,
+                userId,
+                disableVoip: true,
+            });
+
+            // Only check createCall / supportsVoip, avoid startClient
+            expect(client.createCall("!roomId:example.com")).toBeNull();
+            expect(client.supportsVoip?.()).toBe(false);
+        });
+
+        it("should call /voip/turnServer when disableVoip is not set", () => {
+            fetchMock.getOnce(`${baseUrl}/_matrix/client/unstable/voip/turnServer`, {
+                uris: ["turn:turn.example.org"],
+            });
+
+            createClient({
+                baseUrl,
+                accessToken,
+                userId,
+            });
+
+            // The call will trigger the request if VoIP is supported
+            expect(fetchMock.called(`${baseUrl}/_matrix/client/unstable/voip/turnServer`)).toBe(false);
+        });
+
+        it("should return null from createCall when disableVoip = true", () => {
+            const client = createClient({
+                baseUrl,
+                accessToken,
+                userId,
+                disableVoip: true,
+            });
+
+            expect(client.createCall("!roomId:example.com")).toBeNull();
+        });
+    });
+
     describe("support for ignoring invites", () => {
         beforeEach(() => {
             // Mockup `getAccountData`/`setAccountData`.
@@ -2998,6 +3216,8 @@ describe("MatrixClient", function () {
                     replacedByDynamicPredecessor2,
                     room2,
                 ];
+                client.store.getRoom = (roomId: string) =>
+                    client.store.getRooms().find((r) => r.roomId === roomId) || null;
                 room1.addLiveEvents(
                     [
                         roomCreateEvent(room1.roomId, replacedByCreate1.roomId),
@@ -3036,6 +3256,7 @@ describe("MatrixClient", function () {
                     replacedByDynamicPredecessor2,
                 };
             }
+
             it("Returns an empty list if there are no rooms", () => {
                 client.store = new StubStore();
                 client.store.getRooms = () => [];
@@ -3062,6 +3283,8 @@ describe("MatrixClient", function () {
                 const room2 = new Room("room2", client, "@daryl:alexandria.example.com");
                 client.store = new StubStore();
                 client.store.getRooms = () => [room1, replacedRoom1, replacedRoom2, room2];
+                client.store.getRoom = (roomId: string) =>
+                    client.store.getRooms().find((r) => r.roomId === roomId) || null;
                 room1.addLiveEvents([roomCreateEvent(room1.roomId, replacedRoom1.roomId)], { addToState: true });
                 room2.addLiveEvents([roomCreateEvent(room2.roomId, replacedRoom2.roomId)], { addToState: true });
                 replacedRoom1.addLiveEvents([tombstoneEvent(room1.roomId, replacedRoom1.roomId)], { addToState: true });
@@ -3124,6 +3347,24 @@ describe("MatrixClient", function () {
                 expect(rooms).not.toContain(replacedByDynamicPredecessor2);
                 expect(rooms).toContain(replacedByCreate1);
                 expect(rooms).toContain(replacedByCreate2);
+                expect(rooms).toContain(room1);
+                expect(rooms).toContain(room2);
+            });
+
+            it("should ignore room replacements which are not reciprocated by the predecessor", () => {
+                const room1 = new Room("room1", client, "@carol:alexandria.example.com");
+                // Room 2 claims to replace room 1 but room 1 does not agree
+                const room2 = new Room("replacedRoom1", client, "@daryl:alexandria.example.com");
+
+                client.store = new StubStore();
+                client.store.getRooms = () => [room1, room2];
+                client.store.getRoom = (roomId: string) =>
+                    client.store.getRooms().find((r) => r.roomId === roomId) || null;
+
+                room2.addLiveEvents([roomCreateEvent(room2.roomId, room1.roomId)], { addToState: true });
+
+                // When we ask for the visible rooms
+                const rooms = client.getVisibleRooms();
                 expect(rooms).toContain(room1);
                 expect(rooms).toContain(room2);
             });
@@ -3594,24 +3835,6 @@ describe("MatrixClient", function () {
                 kind: null,
             });
             expect(result).toEqual({});
-        });
-    });
-
-    describe("getAuthIssuer", () => {
-        it("should use unstable prefix", async () => {
-            httpLookups = [
-                {
-                    method: "GET",
-                    path: `/auth_issuer`,
-                    data: {
-                        issuer: "https://issuer/",
-                    },
-                    prefix: "/_matrix/client/unstable/org.matrix.msc2965",
-                },
-            ];
-
-            await expect(client.getAuthIssuer()).resolves.toEqual({ issuer: "https://issuer/" });
-            expect(httpLookups.length).toEqual(0);
         });
     });
 

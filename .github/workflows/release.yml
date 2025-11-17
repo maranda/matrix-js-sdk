@@ -44,13 +44,13 @@ jobs:
                 repo:
                     - element-hq/element-web
         steps:
-            - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+            - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
               with:
                   repository: ${{ matrix.repo }}
                   ref: staging
                   token: ${{ secrets.ELEMENT_BOT_TOKEN }}
 
-            - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+            - uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6
               with:
                   cache: "yarn"
                   node-version: "lts/*"
@@ -73,10 +73,10 @@ jobs:
         runs-on: ubuntu-24.04
         steps:
             - name: 🧮 Checkout code
-              uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+              uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5
 
             - name: 🔧 Yarn cache
-              uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+              uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6
               with:
                   cache: "yarn"
                   node-version-file: package.json
@@ -88,7 +88,7 @@ jobs:
               run: yarn gendoc
 
             - name: Upload artifact
-              uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+              uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
               with:
                   path: _docs
 

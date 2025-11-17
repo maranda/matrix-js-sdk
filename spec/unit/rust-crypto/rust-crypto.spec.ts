@@ -47,7 +47,7 @@ import {
     MemoryCryptoStore,
     TypedEventEmitter,
 } from "../../../src";
-import { emitPromise, mkEvent } from "../../test-utils/test-utils";
+import { emitPromise, mkEvent, waitFor } from "../../test-utils/test-utils";
 import { type CryptoBackend } from "../../../src/common-crypto/CryptoBackend";
 import { type IEventDecryptionResult, type IMegolmSessionData } from "../../../src/@types/crypto";
 import { type OutgoingRequestProcessor } from "../../../src/rust-crypto/OutgoingRequestProcessor";
@@ -130,8 +130,8 @@ describe("initRustCrypto", () => {
             storePassphrase: "storePassphrase",
         });
 
-        expect(StoreHandle.open).toHaveBeenCalledWith("storePrefix", "storePassphrase");
-        expect(OlmMachine.initFromStore).toHaveBeenCalledWith(expect.anything(), expect.anything(), mockStore);
+        expect(StoreHandle.open).toHaveBeenCalledWith("storePrefix", "storePassphrase", logger);
+        expect(OlmMachine.initFromStore).toHaveBeenCalledWith(expect.anything(), expect.anything(), mockStore, logger);
     });
 
     it("passes through the store params (key)", async () => {
@@ -154,8 +154,8 @@ describe("initRustCrypto", () => {
             storeKey: storeKey,
         });
 
-        expect(StoreHandle.openWithKey).toHaveBeenCalledWith("storePrefix", storeKey);
-        expect(OlmMachine.initFromStore).toHaveBeenCalledWith(expect.anything(), expect.anything(), mockStore);
+        expect(StoreHandle.openWithKey).toHaveBeenCalledWith("storePrefix", storeKey, logger);
+        expect(OlmMachine.initFromStore).toHaveBeenCalledWith(expect.anything(), expect.anything(), mockStore, logger);
     });
 
     it("suppresses the storePassphrase and storeKey if storePrefix is unset", async () => {
@@ -178,8 +178,8 @@ describe("initRustCrypto", () => {
             storePassphrase: "storePassphrase",
         });
 
-        expect(StoreHandle.open).toHaveBeenCalledWith();
-        expect(OlmMachine.initFromStore).toHaveBeenCalledWith(expect.anything(), expect.anything(), mockStore);
+        expect(StoreHandle.open).toHaveBeenCalledWith(null, null, logger);
+        expect(OlmMachine.initFromStore).toHaveBeenCalledWith(expect.anything(), expect.anything(), mockStore, logger);
     });
 
     it("Should get secrets from inbox on start", async () => {
@@ -278,6 +278,7 @@ describe("initRustCrypto", () => {
                 expect.any(BaseMigrationData),
                 new Uint8Array(Buffer.from(PICKLE_KEY)),
                 mockStore,
+                logger,
             );
             const data = mocked(Migration.migrateBaseData).mock.calls[0][0];
             expect(data.pickledAccount).toEqual("not a real account");
@@ -294,6 +295,7 @@ describe("initRustCrypto", () => {
                 expect.any(Array),
                 new Uint8Array(Buffer.from(PICKLE_KEY)),
                 mockStore,
+                logger,
             );
             // First call should have 50 entries; second should have 10
             const sessions1: PickledSession[] = mocked(Migration.migrateOlmSessions).mock.calls[0][0];
@@ -316,6 +318,7 @@ describe("initRustCrypto", () => {
                 expect.any(Array),
                 new Uint8Array(Buffer.from(PICKLE_KEY)),
                 mockStore,
+                logger,
             );
             // First call should have 50 entries; second should have 10
             const megolmSessions1: PickledInboundGroupSession[] = mocked(Migration.migrateMegolmSessions).mock
@@ -424,6 +427,7 @@ describe("initRustCrypto", () => {
                 expect.any(Array),
                 new Uint8Array(Buffer.from(PICKLE_KEY)),
                 mockStore,
+                logger,
             );
             const megolmSessions: PickledInboundGroupSession[] = mocked(Migration.migrateMegolmSessions).mock
                 .calls[0][0];
@@ -826,6 +830,7 @@ describe("RustCrypto", () => {
                 TEST_DEVICE_ID,
                 secretStorage,
                 {} as CryptoCallbacks,
+                false,
             );
 
             async function createSecretStorageKey() {
@@ -849,9 +854,27 @@ describe("RustCrypto", () => {
         });
     });
 
+    it("getSecretStorageStatus", async () => {
+        const mockSecretStorage = {
+            getDefaultKeyId: jest.fn().mockResolvedValue("blah"),
+            isStored: jest.fn().mockResolvedValue({ blah: {} }),
+        } as unknown as Mocked<ServerSideSecretStorage>;
+        const rustCrypto = await makeTestRustCrypto(undefined, undefined, undefined, mockSecretStorage);
+        await expect(rustCrypto.getSecretStorageStatus()).resolves.toEqual({
+            defaultKeyId: "blah",
+            ready: true,
+            secretStorageKeyValidityMap: {
+                "m.cross_signing.master": true,
+                "m.cross_signing.self_signing": true,
+                "m.cross_signing.user_signing": true,
+            },
+        });
+    });
+
     it("isSecretStorageReady", async () => {
         const mockSecretStorage = {
             getDefaultKeyId: jest.fn().mockResolvedValue(null),
+            isStored: jest.fn().mockResolvedValue(null),
         } as unknown as Mocked<ServerSideSecretStorage>;
         const rustCrypto = await makeTestRustCrypto(undefined, undefined, undefined, mockSecretStorage);
         await expect(rustCrypto.isSecretStorageReady()).resolves.toBe(false);
@@ -1113,6 +1136,7 @@ describe("RustCrypto", () => {
 
         it.each([
             [undefined, undefined, null],
+            ["Other", -1, EventShieldReason.UNKNOWN],
             [
                 "Encrypted by an unverified user.",
                 RustSdkCryptoJs.ShieldStateCode.UnverifiedIdentity,
@@ -1138,6 +1162,11 @@ describe("RustCrypto", () => {
                 "Encrypted by a previously-verified user who is no longer verified.",
                 RustSdkCryptoJs.ShieldStateCode.VerificationViolation,
                 EventShieldReason.VERIFICATION_VIOLATION,
+            ],
+            [
+                "Mismatched sender",
+                RustSdkCryptoJs.ShieldStateCode.MismatchedSender,
+                EventShieldReason.MISMATCHED_SENDER,
             ],
         ])("gets the right shield reason (%s)", async (rustReason, rustCode, expectedReason) => {
             // suppress the warning from the unknown shield reason
@@ -1548,14 +1577,6 @@ describe("RustCrypto", () => {
             const e2eKeyReceiver = new E2EKeyReceiver("http://server");
             const e2eKeyResponder = new E2EKeyResponder("http://server");
             e2eKeyResponder.addKeyReceiver(TEST_USER, e2eKeyReceiver);
-            fetchMock.post("path:/_matrix/client/v3/keys/device_signing/upload", {
-                status: 200,
-                body: {},
-            });
-            fetchMock.post("path:/_matrix/client/v3/keys/signatures/upload", {
-                status: 200,
-                body: {},
-            });
             await rustCrypto.bootstrapCrossSigning({ setupNewCrossSigning: true });
             await expect(rustCrypto.pinCurrentUserIdentity(TEST_USER)).rejects.toThrow(
                 "Cannot pin identity of own user",
@@ -1793,14 +1814,6 @@ describe("RustCrypto", () => {
                     error: "Not found",
                 },
             });
-            fetchMock.post("path:/_matrix/client/v3/keys/device_signing/upload", {
-                status: 200,
-                body: {},
-            });
-            fetchMock.post("path:/_matrix/client/v3/keys/signatures/upload", {
-                status: 200,
-                body: {},
-            });
             const rustCrypto1 = await makeTestRustCrypto(makeMatrixHttpApi(), TEST_USER, TEST_DEVICE_ID, secretStorage);
 
             // dehydration requires secret storage and cross signing
@@ -1933,14 +1946,6 @@ describe("RustCrypto", () => {
                         errcode: "M_NOT_FOUND",
                         error: "Not found",
                     },
-                });
-                fetchMock.post("path:/_matrix/client/v3/keys/device_signing/upload", {
-                    status: 200,
-                    body: {},
-                });
-                fetchMock.post("path:/_matrix/client/v3/keys/signatures/upload", {
-                    status: 200,
-                    body: {},
                 });
                 rustCrypto = await makeTestRustCrypto(makeMatrixHttpApi(), TEST_USER, TEST_DEVICE_ID, secretStorage);
 
@@ -2302,8 +2307,9 @@ describe("RustCrypto", () => {
             });
 
             const rustCrypto = await makeTestRustCrypto(makeMatrixHttpApi(), undefined, undefined, secretStorage);
+
             // We have a key backup
-            expect(await rustCrypto.getActiveSessionBackupVersion()).not.toBeNull();
+            await waitFor(async () => expect(await rustCrypto.getActiveSessionBackupVersion()).not.toBeNull());
 
             const authUploadDeviceSigningKeys = jest.fn();
             await rustCrypto.resetEncryption(authUploadDeviceSigningKeys);
@@ -2358,6 +2364,207 @@ describe("RustCrypto", () => {
             expect(backupIsDeleted).toBeTruthy();
             expect(dehydratedDeviceIsDeleted).toBeTruthy();
         });
+    });
+
+    describe("maybeAcceptKeyBundle", () => {
+        let mockOlmMachine: Mocked<OlmMachine>;
+        let rustCrypto: RustCrypto;
+
+        beforeEach(async () => {
+            mockOlmMachine = {
+                queryKeysForUsers: jest.fn().mockReturnValue({}),
+                getReceivedRoomKeyBundleData: jest.fn(),
+                receiveRoomKeyBundle: jest.fn(),
+            } as unknown as Mocked<OlmMachine>;
+
+            const http = new MatrixHttpApi(new TypedEventEmitter<HttpApiEvent, HttpApiEventHandlerMap>(), {
+                baseUrl: "http://server/",
+                prefix: "",
+                onlyData: true,
+            });
+
+            rustCrypto = new RustCrypto(
+                new DebugLogger(debug("matrix-js-sdk:test:rust-crypto.spec:maybeAcceptKeyBundle")),
+                mockOlmMachine,
+                http,
+                TEST_USER,
+                TEST_DEVICE_ID,
+                {} as ServerSideSecretStorage,
+                {} as CryptoCallbacks,
+            );
+        });
+
+        it("does nothing if there is no key bundle", async () => {
+            mockOlmMachine.getReceivedRoomKeyBundleData.mockResolvedValue(undefined);
+            await rustCrypto.maybeAcceptKeyBundle("!room_id", "@bob:example.org");
+            expect(mockOlmMachine.queryKeysForUsers).toHaveBeenCalledTimes(1);
+            expect(mockOlmMachine.getReceivedRoomKeyBundleData).toHaveBeenCalledTimes(1);
+            expect(mockOlmMachine.getReceivedRoomKeyBundleData.mock.calls[0][0].toString()).toEqual("!room_id");
+            expect(mockOlmMachine.getReceivedRoomKeyBundleData.mock.calls[0][1].toString()).toEqual("@bob:example.org");
+
+            expect(mockOlmMachine.receiveRoomKeyBundle).not.toHaveBeenCalled();
+        });
+
+        it("fetches the bundle via http and throws an error on failure", async () => {
+            const bundleData = { url: "mxc://server/data" } as RustSdkCryptoJs.StoredRoomKeyBundleData;
+            mockOlmMachine.getReceivedRoomKeyBundleData.mockResolvedValue(bundleData);
+
+            fetchMock.get("http://server/_matrix/client/v1/media/download/server/data?allow_redirect=true", {
+                status: 404,
+                body: {
+                    errcode: "M_NOT_FOUND",
+                    error: "Not found",
+                },
+            });
+
+            await expect(() => rustCrypto.maybeAcceptKeyBundle("!room_id", "@bob:example.org")).rejects.toMatchObject({
+                errcode: "M_NOT_FOUND",
+                httpStatus: 404,
+            });
+        });
+
+        it("fetches the bundle via http and passes it back into the OlmMachine", async () => {
+            const bundleData = { url: "mxc://server/data" } as RustSdkCryptoJs.StoredRoomKeyBundleData;
+            mockOlmMachine.getReceivedRoomKeyBundleData.mockResolvedValue(bundleData);
+
+            fetchMock.get("http://server/_matrix/client/v1/media/download/server/data?allow_redirect=true", {
+                body: "asdfghjkl",
+            });
+
+            await rustCrypto.maybeAcceptKeyBundle("!room_id", "@bob:example.org");
+            expect(mockOlmMachine.receiveRoomKeyBundle).toHaveBeenCalledTimes(1);
+            expect(mockOlmMachine.receiveRoomKeyBundle.mock.calls[0][0]).toBe(bundleData);
+            expect(mockOlmMachine.receiveRoomKeyBundle.mock.calls[0][1]).toEqual(new TextEncoder().encode("asdfghjkl"));
+        });
+    });
+
+    describe("Verification requests", () => {
+        it("fetches device details before room verification requests", async () => {
+            // Given a RustCrypto
+            const olmMachine = mockedOlmMachine();
+            const outgoingRequestProcessor = mockedOutgoingRequestProcessor();
+            const rustCrypto = makeRustCrypto(olmMachine, outgoingRequestProcessor);
+
+            // When we receive a room verification request
+            const event = mockedEvent("!r:s.co", "@u:s.co", "m.room.message", "m.key.verification.request");
+            await rustCrypto.onLiveEventFromSync(event);
+
+            // Then we first fetch device details
+            expect(outgoingRequestProcessor.makeOutgoingRequest).toHaveBeenCalled();
+
+            // And we handle the verification event as normal
+            expect(olmMachine.receiveVerificationEvent).toHaveBeenCalled();
+        });
+
+        it("does not fetch device details before other verification events", async () => {
+            // Given a RustCrypto
+            const olmMachine = mockedOlmMachine();
+            const outgoingRequestProcessor = mockedOutgoingRequestProcessor();
+            const rustCrypto = makeRustCrypto(olmMachine, outgoingRequestProcessor);
+
+            // When we receive some verification event that is not a room request
+            const event = mockedEvent("!r:s.co", "@u:s.co", "m.key.verification.start");
+            await rustCrypto.onLiveEventFromSync(event);
+
+            // Then we do not fetch device details
+            expect(outgoingRequestProcessor.makeOutgoingRequest).not.toHaveBeenCalled();
+
+            // And we handle the verification event as normal
+            expect(olmMachine.receiveVerificationEvent).toHaveBeenCalled();
+        });
+
+        it("throws an error if sender is missing", async () => {
+            // Given a RustCrypto
+            const olmMachine = mockedOlmMachine();
+            const outgoingRequestProcessor = mockedOutgoingRequestProcessor();
+            const rustCrypto = makeRustCrypto(olmMachine, outgoingRequestProcessor);
+
+            // When we receive a verification event without a sender
+            // Then we throw
+            const event = mockedEvent("!r:s.co", null, "m.key.verification.start");
+
+            await expect(async () => await rustCrypto.onLiveEventFromSync(event)).rejects.toThrow(
+                "missing sender in the event",
+            );
+
+            // And we do not fetch device details or handle the event
+            expect(outgoingRequestProcessor.makeOutgoingRequest).not.toHaveBeenCalled();
+            expect(olmMachine.receiveVerificationEvent).not.toHaveBeenCalled();
+        });
+
+        it("throws an error if room is missing", async () => {
+            // Given a RustCrypto
+            const olmMachine = mockedOlmMachine();
+            const outgoingRequestProcessor = mockedOutgoingRequestProcessor();
+            const rustCrypto = makeRustCrypto(olmMachine, outgoingRequestProcessor);
+
+            // When we receive a verification event without a sender
+            // Then we throw
+            const event = mockedEvent(null, "@u:s.co", "m.key.verification.start");
+
+            await expect(async () => await rustCrypto.onLiveEventFromSync(event)).rejects.toThrow(
+                "missing roomId in the event",
+            );
+
+            // And we do not fetch device details or handle the event
+            expect(outgoingRequestProcessor.makeOutgoingRequest).not.toHaveBeenCalled();
+            expect(olmMachine.receiveVerificationEvent).not.toHaveBeenCalled();
+        });
+
+        function mockedOlmMachine(): Mocked<OlmMachine> {
+            return {
+                queryKeysForUsers: jest.fn(),
+                getVerificationRequest: jest.fn(),
+                receiveVerificationEvent: jest.fn(),
+            } as unknown as Mocked<OlmMachine>;
+        }
+
+        function makeRustCrypto(
+            olmMachine: OlmMachine,
+            outgoingRequestProcessor: OutgoingRequestProcessor,
+        ): RustCrypto {
+            const rustCrypto = new RustCrypto(
+                new DebugLogger(debug("test Verification requests")),
+                olmMachine,
+                {} as unknown as MatrixHttpApi<IHttpOpts & { onlyData: true }>,
+                TEST_USER,
+                TEST_DEVICE_ID,
+                {} as ServerSideSecretStorage,
+                {} as CryptoCallbacks,
+            );
+
+            // @ts-ignore mocking outgoingRequestProcessor
+            rustCrypto.outgoingRequestProcessor = outgoingRequestProcessor;
+
+            return rustCrypto;
+        }
+
+        function mockedOutgoingRequestProcessor(): OutgoingRequestProcessor {
+            return {
+                makeOutgoingRequest: jest.fn(),
+            } as unknown as Mocked<OutgoingRequestProcessor>;
+        }
+
+        function mockedEvent(
+            roomId: string | null,
+            senderId: string | null,
+            eventType: string,
+            msgtype?: string | undefined,
+        ): MatrixEvent {
+            return {
+                isState: jest.fn().mockReturnValue(false),
+                getUnsigned: jest.fn().mockReturnValue({}),
+                isDecryptionFailure: jest.fn(),
+                isEncrypted: jest.fn(),
+                getType: jest.fn().mockReturnValue(eventType),
+                getRoomId: jest.fn().mockReturnValue(roomId),
+                getSender: jest.fn().mockReturnValue(senderId),
+                getId: jest.fn(),
+                getStateKey: jest.fn(),
+                getContent: jest.fn().mockReturnValue({ msgtype: msgtype }),
+                getTs: jest.fn(),
+            } as unknown as MatrixEvent;
+        }
     });
 });
 

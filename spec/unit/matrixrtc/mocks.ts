@@ -15,16 +15,18 @@ limitations under the License.
 */
 
 import { EventEmitter } from "stream";
+import { type Mocked } from "jest-mock";
 
 import { EventType, type Room, RoomEvent, type MatrixClient, type MatrixEvent } from "../../../src";
 import { CallMembership, type SessionMembershipData } from "../../../src/matrixrtc/CallMembership";
 import { secureRandomString } from "../../../src/randomstring";
 
-type MembershipData = SessionMembershipData[] | SessionMembershipData | {};
+export type MembershipData = (SessionMembershipData | {}) & { user_id: string };
 
-export const membershipTemplate: SessionMembershipData = {
+export const membershipTemplate: SessionMembershipData & { user_id: string } = {
     application: "m.call",
     call_id: "",
+    user_id: "@mock:user.example",
     device_id: "AAAAAAA",
     scope: "m.room",
     focus_active: { type: "livekit", focus_selection: "oldest_membership" },
@@ -50,6 +52,11 @@ export type MockClient = Pick<
     | "sendStateEvent"
     | "_unstable_sendDelayedStateEvent"
     | "_unstable_updateDelayedEvent"
+    | "_unstable_cancelScheduledDelayedEvent"
+    | "_unstable_restartScheduledDelayedEvent"
+    | "_unstable_sendScheduledDelayedEvent"
+    | "_unstable_sendStickyEvent"
+    | "_unstable_sendStickyDelayedEvent"
     | "cancelPendingEvent"
 >;
 /**
@@ -63,16 +70,23 @@ export function makeMockClient(userId: string, deviceId: string): MockClient {
         sendStateEvent: jest.fn(),
         cancelPendingEvent: jest.fn(),
         _unstable_updateDelayedEvent: jest.fn(),
+        _unstable_cancelScheduledDelayedEvent: jest.fn(),
+        _unstable_restartScheduledDelayedEvent: jest.fn(),
+        _unstable_sendScheduledDelayedEvent: jest.fn(),
         _unstable_sendDelayedStateEvent: jest.fn(),
+        _unstable_sendStickyEvent: jest.fn(),
+        _unstable_sendStickyDelayedEvent: jest.fn(),
     };
 }
 
 export function makeMockRoom(
-    membershipData: MembershipData,
-): Room & { emitTimelineEvent: (event: MatrixEvent) => void } {
+    membershipData: MembershipData[],
+    useStickyEvents = false,
+): Mocked<Room & { emitTimelineEvent: (event: MatrixEvent) => void }> {
     const roomId = secureRandomString(8);
     // Caching roomState here so it does not get recreated when calling `getLiveTimeline.getState()`
-    const roomState = makeMockRoomState(membershipData, roomId);
+    const roomState = makeMockRoomState(useStickyEvents ? [] : membershipData, roomId);
+    const ts = Date.now();
     const room = Object.assign(new EventEmitter(), {
         roomId: roomId,
         hasMembershipState: jest.fn().mockReturnValue(true),
@@ -80,17 +94,20 @@ export function makeMockRoom(
             getState: jest.fn().mockReturnValue(roomState),
         }),
         getVersion: jest.fn().mockReturnValue("default"),
-    }) as unknown as Room;
+        _unstable_getStickyEvents: jest
+            .fn()
+            .mockImplementation(() =>
+                useStickyEvents ? membershipData.map((m) => mockRTCEvent(m, roomId, 10000, ts)) : [],
+            ) as any,
+    });
     return Object.assign(room, {
         emitTimelineEvent: (event: MatrixEvent) =>
             room.emit(RoomEvent.Timeline, event, room, undefined, false, {} as any),
-    });
+    }) as unknown as Mocked<Room & { emitTimelineEvent: (event: MatrixEvent) => void }>;
 }
 
-export function makeMockRoomState(membershipData: MembershipData, roomId: string) {
-    const events = Array.isArray(membershipData)
-        ? membershipData.map((m) => mockRTCEvent(m, roomId))
-        : [mockRTCEvent(membershipData, roomId)];
+function makeMockRoomState(membershipData: MembershipData[], roomId: string) {
+    const events = membershipData.map((m) => mockRTCEvent(m, roomId));
     const keysAndEvents = events.map((e) => {
         const data = e.getContent() as SessionMembershipData;
         return [`_${e.sender?.userId}_${data.device_id}`];
@@ -120,12 +137,17 @@ export function makeMockRoomState(membershipData: MembershipData, roomId: string
     };
 }
 
+export function mockRoomState(room: Room, membershipData: MembershipData[]): void {
+    room.getLiveTimeline().getState = jest.fn().mockReturnValue(makeMockRoomState(membershipData, room.roomId));
+}
+
 export function makeMockEvent(
     type: string,
     sender: string,
     roomId: string | undefined,
     content: any,
     timestamp?: number,
+    stateKey?: string,
 ): MatrixEvent {
     return {
         getType: jest.fn().mockReturnValue(type),
@@ -134,17 +156,32 @@ export function makeMockEvent(
         getTs: jest.fn().mockReturnValue(timestamp ?? Date.now()),
         getRoomId: jest.fn().mockReturnValue(roomId),
         getId: jest.fn().mockReturnValue(secureRandomString(8)),
+        getStateKey: jest.fn().mockReturnValue(stateKey),
         isDecryptionFailure: jest.fn().mockReturnValue(false),
     } as unknown as MatrixEvent;
 }
 
-export function mockRTCEvent(membershipData: MembershipData, roomId: string, customSender?: string): MatrixEvent {
-    const sender = customSender ?? "@mock:user.example";
-    return makeMockEvent(EventType.GroupCallMemberPrefix, sender, roomId, membershipData);
+export function mockRTCEvent(
+    { user_id: sender, ...membershipData }: MembershipData,
+    roomId: string,
+    stickyDuration?: number,
+    timestamp?: number,
+): MatrixEvent {
+    return {
+        ...makeMockEvent(
+            stickyDuration !== undefined ? EventType.RTCMembership : EventType.GroupCallMemberPrefix,
+            sender,
+            roomId,
+            membershipData,
+            timestamp,
+            !stickyDuration && "device_id" in membershipData ? `_${sender}_${membershipData.device_id}` : "",
+        ),
+        unstableStickyExpiresAt: stickyDuration,
+    } as unknown as MatrixEvent;
 }
 
-export function mockCallMembership(membershipData: MembershipData, roomId: string, sender?: string): CallMembership {
-    return new CallMembership(mockRTCEvent(membershipData, roomId, sender), membershipData);
+export function mockCallMembership(membershipData: MembershipData, roomId: string): CallMembership {
+    return new CallMembership(mockRTCEvent(membershipData, roomId), membershipData);
 }
 
 export function makeKey(id: number, key: string): { key: string; index: number } {

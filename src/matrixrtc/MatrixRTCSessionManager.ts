@@ -18,9 +18,9 @@ import { type Logger } from "../logger.ts";
 import { type MatrixClient, ClientEvent } from "../client.ts";
 import { TypedEventEmitter } from "../models/typed-event-emitter.ts";
 import { type Room } from "../models/room.ts";
-import { type RoomState, RoomStateEvent } from "../models/room-state.ts";
+import { RoomStateEvent } from "../models/room-state.ts";
 import { type MatrixEvent } from "../models/event.ts";
-import { MatrixRTCSession } from "./MatrixRTCSession.ts";
+import { MatrixRTCSession, type SlotDescription } from "./MatrixRTCSession.ts";
 import { EventType } from "../@types/event.ts";
 
 export enum MatrixRTCSessionManagerEvents {
@@ -37,6 +37,9 @@ type EventHandlerMap = {
 
 /**
  * Holds all active MatrixRTC session objects and creates new ones as events arrive.
+ * One `MatrixRTCSessionManager` is required for each MatrixRTC sessionDescription (application, session id) that the client wants to support.
+ * If no application type is specified in the constructor, the default is "m.call".
+ *
  * This interface is UNSTABLE and may change without warning.
  */
 export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionManagerEvents, EventHandlerMap> {
@@ -53,6 +56,7 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
     public constructor(
         rootLogger: Logger,
         private client: MatrixClient,
+        private readonly slotDescription: SlotDescription = { application: "m.call", id: "" }, // Default to the Matrix Call application
     ) {
         super();
         this.logger = rootLogger.getChild("[MatrixRTCSessionManager]");
@@ -62,13 +66,14 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
         // We shouldn't need to null-check here, but matrix-client.spec.ts mocks getRooms
         // returning nothing, and breaks tests if you change it to return an empty array :'(
         for (const room of this.client.getRooms() ?? []) {
-            const session = MatrixRTCSession.roomSessionForRoom(this.client, room);
+            const session = MatrixRTCSession.sessionForRoom(this.client, room, this.slotDescription);
             if (session.memberships.length > 0) {
                 this.roomSessions.set(room.roomId, session);
             }
         }
 
         this.client.on(ClientEvent.Room, this.onRoom);
+        this.client.on(ClientEvent.Event, this.onEvent);
         this.client.on(RoomStateEvent.Events, this.onRoomState);
     }
 
@@ -79,6 +84,7 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
         this.roomSessions.clear();
 
         this.client.off(ClientEvent.Room, this.onRoom);
+        this.client.off(ClientEvent.Event, this.onEvent);
         this.client.off(RoomStateEvent.Events, this.onRoomState);
     }
 
@@ -96,7 +102,10 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
      */
     public getRoomSession(room: Room): MatrixRTCSession {
         if (!this.roomSessions.has(room.roomId)) {
-            this.roomSessions.set(room.roomId, MatrixRTCSession.roomSessionForRoom(this.client, room));
+            this.roomSessions.set(
+                room.roomId,
+                MatrixRTCSession.sessionForRoom(this.client, room, this.slotDescription),
+            );
         }
 
         return this.roomSessions.get(room.roomId)!;
@@ -106,16 +115,28 @@ export class MatrixRTCSessionManager extends TypedEventEmitter<MatrixRTCSessionM
         this.refreshRoom(room);
     };
 
-    private onRoomState = (event: MatrixEvent, _state: RoomState): void => {
+    private readonly onEvent = (event: MatrixEvent): void => {
+        if (!event.unstableStickyExpiresAt) return; // Not sticky, not interested.
+
+        if (event.getType() !== EventType.RTCMembership) return;
+
+        const room = this.client.getRoom(event.getRoomId());
+        if (!room) return;
+
+        this.refreshRoom(room);
+    };
+
+    private readonly onRoomState = (event: MatrixEvent): void => {
+        if (event.getType() !== EventType.GroupCallMemberPrefix) {
+            return;
+        }
         const room = this.client.getRoom(event.getRoomId());
         if (!room) {
             this.logger.error(`Got room state event for unknown room ${event.getRoomId()}!`);
             return;
         }
 
-        if (event.getType() == EventType.GroupCallMemberPrefix) {
-            this.refreshRoom(room);
-        }
+        this.refreshRoom(room);
     };
 
     private refreshRoom(room: Room): void {
